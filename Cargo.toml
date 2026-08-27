@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "crates/shelllist-daemon-core",
   "crates/shelllist-search",
 ]
 

@@ -33,9 +33,21 @@
           default = shelllistSearch;
         });
 
-      checks = forAllSystems (system: {
-        shelllistSearch = self.packages.${system}.shelllistSearch;
-      });
+      checks = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in {
+          shelllistSearch = self.packages.${system}.shelllistSearch;
+          workspace = pkgs.rustPlatform.buildRustPackage {
+            pname = "daemon-framework-workspace-check";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "--workspace" ];
+            cargoTestFlags = [ "--workspace" ];
+            installPhase = "touch $out";
+          };
+        });
 
       apps = forAllSystems (system: {
         shelllistSearch = {

@@ -76,6 +76,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "shelllist-daemon-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "shelllist-search"
 version = "0.1.0"
 dependencies = [
