@@ -4,8 +4,8 @@ Shared Rust infrastructure and process services for the Shelllist daemon family.
 
 ## Workspace crates
 
-- `shelllist-daemon-core` — runtime-independent protocol, envelope, JSONL wire, and state helpers (planned).
-- `shelllist-daemon-tokio` — Tokio and session D-Bus transport, ownership, subscription, and shutdown helpers (planned).
+- `shelllist-daemon-core` — runtime-independent protocol, envelope, JSONL wire, and fixture helpers.
+- `shelllist-daemon-tokio` — Tokio and session D-Bus transport, ordered output, ownership, subscription, and shutdown helpers.
 - `shelllist-search` — typo-tolerant fuzzy result ranking process used by Shelllist.
 
 Domain policy remains in `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon`, and `nm-daemon`. This workspace contains only reusable process infrastructure and services.
