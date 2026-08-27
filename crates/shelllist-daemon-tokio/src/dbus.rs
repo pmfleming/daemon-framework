@@ -5,6 +5,8 @@ use zbus::{message::Header, names::UniqueName, object_server::SignalEmitter};
 
 use shelllist_daemon_core::DaemonEndpoint;
 
+use crate::{OutputCommand, OutputHandle};
+
 #[derive(Clone)]
 pub struct JsonDbusClient {
     connection: zbus::Connection,
@@ -77,6 +79,28 @@ impl JsonDbusClient {
             .await
             .with_context(|| format!("cancel {} request", self.endpoint.executable))?;
         Ok(json!({ "cancelled": request_id }))
+    }
+
+    pub async fn forward_events(&self, output: &OutputHandle) -> Result<()> {
+        let proxy = self.proxy().await?;
+        let mut events = proxy
+            .receive_signal("Event")
+            .await
+            .context("receive daemon events")?;
+        while let Some(message) = events.next().await {
+            let (stream, event_json): (String, String) = message
+                .body()
+                .deserialize()
+                .context("decode daemon event signal")?;
+            let event = serde_json::from_str::<Value>(&event_json)
+                .unwrap_or_else(|_| json!({ "raw": event_json }));
+            output.send(OutputCommand::Event { stream, event }).await?;
+        }
+        anyhow::bail!("daemon event stream ended")
+    }
+
+    pub async fn watch_replacement(&self) -> Result<()> {
+        watch_name_replacement(&self.connection, self.endpoint.bus_name).await
     }
 }
 

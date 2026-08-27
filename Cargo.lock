@@ -643,6 +643,7 @@ dependencies = [
  "serde_json",
  "shelllist-daemon-core",
  "tokio",
+ "tracing",
  "zbus",
 ]
 
