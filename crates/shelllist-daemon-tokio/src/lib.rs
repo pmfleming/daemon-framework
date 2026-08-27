@@ -6,7 +6,10 @@ mod output_actor;
 mod shutdown;
 mod subscription;
 
-pub use dbus::{JsonDbusClient, directed_emitter, wait_for_owner_loss, watch_name_replacement};
+pub use dbus::{
+    JsonDbusClient, directed_emitter, wait_for_owner_loss, wait_for_owner_name_loss,
+    watch_name_replacement,
+};
 pub use jsonl::{CallFailure, CallFailureMapper, CancelMode, JsonlClientConfig, run_jsonl_client};
 pub use output_actor::{
     BasicCorrelation, CorrelationPolicy, OutputCommand, OutputHandle, TrackedId, TrackedKind,

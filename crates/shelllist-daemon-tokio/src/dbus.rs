@@ -119,6 +119,10 @@ pub async fn wait_for_owner_loss(
     connection: &zbus::Connection,
     owner: UniqueName<'static>,
 ) -> Result<()> {
+    wait_for_owner_name_loss(connection, owner.as_str()).await
+}
+
+pub async fn wait_for_owner_name_loss(connection: &zbus::Connection, owner: &str) -> Result<()> {
     let proxy = zbus::Proxy::new(
         connection,
         "org.freedesktop.DBus",
@@ -132,7 +136,7 @@ pub async fn wait_for_owner_loss(
         .await
         .context("receive D-Bus owner changes")?;
     let has_owner: bool = proxy
-        .call("NameHasOwner", &(owner.as_str(),))
+        .call("NameHasOwner", &(owner,))
         .await
         .context("check D-Bus owner")?;
     if !has_owner {
@@ -144,7 +148,7 @@ pub async fn wait_for_owner_loss(
                 .body()
                 .deserialize()
                 .context("decode owner change")?;
-        if name == owner.as_str() && !old_owner.is_empty() && new_owner.is_empty() {
+        if name == owner && !old_owner.is_empty() && new_owner.is_empty() {
             return Ok(());
         }
     }
