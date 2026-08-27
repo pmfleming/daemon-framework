@@ -6,6 +6,7 @@ mod event;
 mod id;
 mod jsonl_wire;
 mod protocol;
+mod state;
 
 pub use endpoint::{ApiIdentity, DaemonEndpoint};
 pub use envelope::{ApiError, error, success};
@@ -16,3 +17,7 @@ pub use jsonl_wire::{
     shutdown_message, transport_error_message,
 };
 pub use protocol::{fixture_names, load_fixture, validate_unique_names};
+pub use state::{
+    AtomicWritePolicy, StateError, XdgRoot, read_json, resolve_xdg_path, resolve_xdg_root,
+    write_json_atomic,
+};

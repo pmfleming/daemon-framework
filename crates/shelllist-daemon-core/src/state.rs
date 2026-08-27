@@ -1,0 +1,194 @@
+use std::env;
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::{Serialize, de::DeserializeOwned};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XdgRoot {
+    Config,
+    State,
+    Cache,
+    Runtime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicWritePolicy {
+    pub directory_mode: u32,
+    pub file_mode: u32,
+    pub pretty: bool,
+    pub sync_parent: bool,
+}
+
+impl AtomicWritePolicy {
+    pub const PRIVATE: Self = Self {
+        directory_mode: 0o700,
+        file_mode: 0o600,
+        pretty: true,
+        sync_parent: true,
+    };
+}
+
+#[derive(Debug)]
+pub enum StateError {
+    Io(io::Error),
+    Json(serde_json::Error),
+    InvalidPath,
+}
+
+impl fmt::Display for StateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "state I/O failed: {error}"),
+            Self::Json(error) => write!(formatter, "state JSON failed: {error}"),
+            Self::InvalidPath => formatter.write_str("state path has no parent or file name"),
+        }
+    }
+}
+
+impl std::error::Error for StateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::InvalidPath => None,
+        }
+    }
+}
+
+impl From<io::Error> for StateError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for StateError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+#[must_use]
+pub fn resolve_xdg_root(root: XdgRoot) -> Option<PathBuf> {
+    let home = || env::var_os("HOME").map(PathBuf::from);
+    match root {
+        XdgRoot::Config => env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home().map(|path| path.join(".config"))),
+        XdgRoot::State => env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home().map(|path| path.join(".local/state"))),
+        XdgRoot::Cache => env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home().map(|path| path.join(".cache"))),
+        XdgRoot::Runtime => env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+    }
+}
+
+#[must_use]
+pub fn resolve_xdg_path(root: XdgRoot, application: &str, path: &Path) -> Option<PathBuf> {
+    resolve_xdg_root(root).map(|base| base.join(application).join(path))
+}
+
+pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StateError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn write_json_atomic<T: Serialize>(
+    path: &Path,
+    value: &T,
+    policy: AtomicWritePolicy,
+) -> Result<(), StateError> {
+    let parent = path.parent().ok_or(StateError::InvalidPath)?;
+    let file_name = path.file_name().ok_or(StateError::InvalidPath)?;
+    fs::create_dir_all(parent)?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(policy.directory_mode))?;
+
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        sequence
+    ));
+    let result = write_and_replace(&temporary, path, value, policy);
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn write_and_replace<T: Serialize>(
+    temporary: &Path,
+    destination: &Path,
+    value: &T,
+    policy: AtomicWritePolicy,
+) -> Result<(), StateError> {
+    let bytes = if policy.pretty {
+        serde_json::to_vec_pretty(value)?
+    } else {
+        serde_json::to_vec(value)?
+    };
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(policy.file_mode)
+        .open(temporary)?;
+    output.write_all(&bytes)?;
+    output.sync_all()?;
+    fs::set_permissions(temporary, fs::Permissions::from_mode(policy.file_mode))?;
+    fs::rename(temporary, destination)?;
+    if policy.sync_parent {
+        File::open(destination.parent().ok_or(StateError::InvalidPath)?)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    #[test]
+    fn private_atomic_json_replaces_complete_files() {
+        let root = std::env::temp_dir().join(format!(
+            "daemon-framework-state-test-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = root.join("state.json");
+        write_json_atomic(
+            &path,
+            &BTreeMap::from([("one", 1)]),
+            AtomicWritePolicy::PRIVATE,
+        )
+        .unwrap();
+        write_json_atomic(
+            &path,
+            &BTreeMap::from([("two", 2)]),
+            AtomicWritePolicy::PRIVATE,
+        )
+        .unwrap();
+        let value = read_json::<BTreeMap<String, i32>>(&path).unwrap().unwrap();
+        assert_eq!(value, BTreeMap::from([("two".into(), 2)]));
+        assert!(!root.read_dir().unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
