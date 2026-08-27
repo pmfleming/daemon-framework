@@ -18,7 +18,12 @@ pub enum CancelMode {
     Unit,
 }
 
-pub type CallFailureMapper = fn(&str, &anyhow::Error) -> Value;
+pub enum CallFailure {
+    Api(Value),
+    Transport(String),
+}
+
+pub type CallFailureMapper = fn(&str, &anyhow::Error) -> CallFailure;
 
 pub struct JsonlClientConfig<P> {
     pub endpoint: DaemonEndpoint,
@@ -114,12 +119,16 @@ fn spawn_request(
     calls.spawn(async move {
         let (id, result, cancelled_request_id) = match request {
             ClientRequest::Call { id, method, params } => {
-                let response = match dbus.as_ref() {
+                let result = match dbus.as_ref() {
                     Some(dbus) => dbus.call(&method, params).await,
                     None => Err(anyhow!("session D-Bus unavailable")),
                 }
-                .unwrap_or_else(|error| call_failure(&method, &error));
-                (id, Ok(response), None)
+                .map_err(|error| call_failure(&method, &error))
+                .or_else(|failure| match failure {
+                    CallFailure::Api(response) => Ok(response),
+                    CallFailure::Transport(error) => Err(error),
+                });
+                (id, result, None)
             }
             ClientRequest::Subscribe { id, streams } => {
                 let result = match dbus.as_ref() {
