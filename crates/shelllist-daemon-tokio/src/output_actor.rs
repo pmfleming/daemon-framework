@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -93,12 +93,18 @@ impl OutputHandle {
     }
 }
 
+enum EventDisposition {
+    Emit,
+    Buffer(String),
+    Drop,
+}
+
 struct OutputState<P> {
     policy: P,
     active_ids: HashSet<String>,
-    subscription_ids: HashSet<String>,
-    pending_events: HashMap<String, Vec<(String, Value)>>,
-    pending_order: VecDeque<String>,
+    pending_events: VecDeque<(String, String, Value)>,
+    suppressed_ids: HashSet<String>,
+    suppressed_order: VecDeque<String>,
     pending_limit: usize,
 }
 
@@ -107,9 +113,9 @@ impl<P: CorrelationPolicy> OutputState<P> {
         Self {
             policy,
             active_ids: HashSet::new(),
-            subscription_ids: HashSet::new(),
-            pending_events: HashMap::new(),
-            pending_order: VecDeque::new(),
+            pending_events: VecDeque::new(),
+            suppressed_ids: HashSet::new(),
+            suppressed_order: VecDeque::new(),
             pending_limit,
         }
     }
@@ -118,43 +124,66 @@ impl<P: CorrelationPolicy> OutputState<P> {
         let Some(tracked) = self.policy.response_id(response) else {
             return Vec::new();
         };
-        self.active_ids.insert(tracked.id.clone());
-        if tracked.kind == TrackedKind::Subscription {
-            self.subscription_ids.insert(tracked.id.clone());
+        if self.suppressed_ids.contains(&tracked.id) {
+            return Vec::new();
         }
+        self.active_ids.insert(tracked.id.clone());
         self.take_pending(&tracked.id)
     }
 
-    fn should_buffer(&self, stream: &str, event: &Value) -> Option<String> {
-        self.policy
-            .event_id(stream, event)
-            .filter(|id| !self.active_ids.contains(id))
+    fn event_disposition(&self, stream: &str, event: &Value) -> EventDisposition {
+        let Some(id) = self.policy.event_id(stream, event) else {
+            return EventDisposition::Emit;
+        };
+        if self.suppressed_ids.contains(&id) {
+            EventDisposition::Drop
+        } else if self.active_ids.contains(&id) {
+            EventDisposition::Emit
+        } else {
+            EventDisposition::Buffer(id)
+        }
     }
 
     fn buffer(&mut self, id: String, stream: String, event: Value) {
-        if !self.pending_events.contains_key(&id) {
-            if self.pending_events.len() >= self.pending_limit
-                && let Some(oldest) = self.pending_order.pop_front()
-            {
-                self.pending_events.remove(&oldest);
-            }
-            self.pending_order.push_back(id.clone());
+        if self.pending_limit == 0 {
+            return;
         }
-        self.pending_events
-            .entry(id)
-            .or_default()
-            .push((stream, event));
+        if self.pending_events.len() >= self.pending_limit {
+            self.pending_events.pop_front();
+        }
+        self.pending_events.push_back((id, stream, event));
     }
 
     fn take_pending(&mut self, id: &str) -> Vec<(String, Value)> {
-        self.pending_order.retain(|candidate| candidate != id);
-        self.pending_events.remove(id).unwrap_or_default()
+        let mut matching = Vec::new();
+        let mut retained = VecDeque::new();
+        while let Some((event_id, stream, event)) = self.pending_events.pop_front() {
+            if event_id == id {
+                matching.push((stream, event));
+            } else {
+                retained.push_back((event_id, stream, event));
+            }
+        }
+        self.pending_events = retained;
+        matching
+    }
+
+    fn suppress(&mut self, id: String) {
+        if self.pending_limit == 0 || !self.suppressed_ids.insert(id.clone()) {
+            return;
+        }
+        if self.suppressed_order.len() >= self.pending_limit
+            && let Some(oldest) = self.suppressed_order.pop_front()
+        {
+            self.suppressed_ids.remove(&oldest);
+        }
+        self.suppressed_order.push_back(id);
     }
 
     fn cancelled(&mut self, id: &str) {
         self.active_ids.remove(id);
-        self.subscription_ids.remove(id);
         self.take_pending(id);
+        self.suppress(id.to_owned());
     }
 
     fn emitted(&mut self, stream: &str, event: &Value) {
@@ -162,6 +191,8 @@ impl<P: CorrelationPolicy> OutputState<P> {
             && let Some(id) = self.policy.event_id(stream, event)
         {
             self.active_ids.remove(&id);
+            self.take_pending(&id);
+            self.suppress(id);
         }
     }
 
@@ -234,11 +265,13 @@ where
                 }
             }
             OutputCommand::Event { stream, event } => {
-                if let Some(id) = state.should_buffer(&stream, &event) {
-                    state.buffer(id, stream, event);
-                } else {
-                    emit_line(&mut writer, &event_message(&stream, event.clone())).await?;
-                    state.emitted(&stream, &event);
+                match state.event_disposition(&stream, &event) {
+                    EventDisposition::Emit => {
+                        emit_line(&mut writer, &event_message(&stream, event.clone())).await?;
+                        state.emitted(&stream, &event);
+                    }
+                    EventDisposition::Buffer(id) => state.buffer(id, stream, event),
+                    EventDisposition::Drop => {}
                 }
             }
             OutputCommand::ProtocolError(error) => {
@@ -273,6 +306,20 @@ mod tests {
     use tokio::io::{AsyncReadExt, duplex};
 
     use super::*;
+
+    #[test]
+    fn pending_limit_counts_events_instead_of_correlation_ids() {
+        let mut state = OutputState::new(BasicCorrelation, 2);
+        for sequence in 1..=3 {
+            state.buffer(
+                "sub-1".into(),
+                "things.changed".into(),
+                serde_json::json!({ "sequence": sequence }),
+            );
+        }
+        assert_eq!(state.pending_events.len(), 2);
+        assert_eq!(state.pending_events[0].2["sequence"], 2);
+    }
 
     #[tokio::test]
     async fn buffers_subscription_events_until_the_response_is_written() {
@@ -311,5 +358,42 @@ mod tests {
             serde_json::from_str::<Value>(lines[1]).unwrap()["kind"],
             "event"
         );
+    }
+
+    #[tokio::test]
+    async fn drops_late_events_after_cancellation() {
+        let (writer, mut reader) = duplex(4096);
+        let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 4, writer);
+        output
+            .send(OutputCommand::Response {
+                id: "subscribe".into(),
+                result: Ok(serde_json::json!({
+                    "data": { "subscription": { "id": "sub-1" } }
+                })),
+                cancelled_request_id: None,
+            })
+            .await
+            .unwrap();
+        output
+            .send(OutputCommand::Response {
+                id: "cancel".into(),
+                result: Ok(serde_json::json!({ "cancelled": "sub-1" })),
+                cancelled_request_id: Some("sub-1".into()),
+            })
+            .await
+            .unwrap();
+        output
+            .send(OutputCommand::Event {
+                stream: "things.changed".into(),
+                event: serde_json::json!({ "subscription_id": "sub-1" }),
+            })
+            .await
+            .unwrap();
+        drop(output);
+        task.await.unwrap().unwrap();
+
+        let mut text = String::new();
+        reader.read_to_string(&mut text).await.unwrap();
+        assert_eq!(text.lines().count(), 2);
     }
 }
