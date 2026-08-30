@@ -80,14 +80,20 @@ pub fn resolve_xdg_root(root: XdgRoot) -> Option<PathBuf> {
         XdgRoot::Config => xdg_home("XDG_CONFIG_HOME", ".config"),
         XdgRoot::State => xdg_home("XDG_STATE_HOME", ".local/state"),
         XdgRoot::Cache => xdg_home("XDG_CACHE_HOME", ".cache"),
-        XdgRoot::Runtime => env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+        XdgRoot::Runtime => absolute_env("XDG_RUNTIME_DIR"),
     }
 }
 
 fn xdg_home(variable: &str, fallback: &str) -> Option<PathBuf> {
-    env::var_os(variable)
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)))
+    absolute_env(variable).or_else(|| absolute_env("HOME").map(|home| home.join(fallback)))
+}
+
+fn absolute_env(name: &str) -> Option<PathBuf> {
+    absolute_path(env::var_os(name).map(PathBuf::from))
+}
+
+fn absolute_path(path: Option<PathBuf>) -> Option<PathBuf> {
+    path.filter(|path| path.is_absolute())
 }
 
 /// Resolves a path below one application's XDG directory.
@@ -186,6 +192,17 @@ mod tests {
         AtomicWritePolicy, TEMP_SEQUENCE, is_safe_relative_path, is_single_normal_component,
         read_json, write_json_atomic,
     };
+
+    #[test]
+    fn xdg_roots_must_be_absolute() {
+        assert_eq!(
+            absolute_path(Some(PathBuf::from("/state"))),
+            Some(PathBuf::from("/state"))
+        );
+        assert_eq!(absolute_path(Some(PathBuf::from("../state"))), None);
+        assert_eq!(absolute_path(Some(PathBuf::from("state"))), None);
+        assert_eq!(absolute_path(None), None);
+    }
 
     #[test]
     fn xdg_suffixes_cannot_escape_the_application_directory() {
