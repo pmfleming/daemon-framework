@@ -22,12 +22,26 @@ pub fn event_envelope(
     correlation: Correlation<'_>,
     fields: Value,
 ) -> Value {
-    let mut envelope = Map::from_iter([
+    let mut envelope = match fields {
+        Value::Object(fields) => fields,
+        _ => Map::new(),
+    };
+    for reserved in [
+        "protocol",
+        "version",
+        "stream",
+        "event",
+        "subscription_id",
+        "request_id",
+    ] {
+        envelope.remove(reserved);
+    }
+    envelope.extend(Map::from_iter([
         ("protocol".into(), json!(api.protocol)),
         ("version".into(), json!(api.version)),
         ("stream".into(), json!(stream)),
         ("event".into(), json!(event)),
-    ]);
+    ]));
     match correlation {
         Correlation::None => {}
         Correlation::Subscription(id) => {
@@ -43,9 +57,6 @@ pub fn event_envelope(
             envelope.insert("subscription_id".into(), json!(subscription_id));
             envelope.insert("request_id".into(), json!(request_id));
         }
-    }
-    if let Value::Object(fields) = fields {
-        envelope.extend(fields);
     }
     Value::Object(envelope)
 }
@@ -66,6 +77,32 @@ mod tests {
             json!({ "data": { "revision": 2 } }),
         );
         assert_eq!(event["subscription_id"], "sub-1");
+        assert_eq!(event["data"]["revision"], 2);
+    }
+
+    #[test]
+    fn domain_fields_cannot_replace_envelope_identity() {
+        let event = event_envelope(
+            ApiIdentity::new("test-api", 1),
+            "things.changed",
+            "changed",
+            Correlation::Subscription("sub-1"),
+            json!({
+                "protocol": "spoofed",
+                "version": 99,
+                "stream": "spoofed",
+                "event": "spoofed",
+                "subscription_id": "spoofed",
+                "request_id": "spoofed",
+                "data": { "revision": 2 }
+            }),
+        );
+        assert_eq!(event["protocol"], "test-api");
+        assert_eq!(event["version"], 1);
+        assert_eq!(event["stream"], "things.changed");
+        assert_eq!(event["event"], "changed");
+        assert_eq!(event["subscription_id"], "sub-1");
+        assert!(event.get("request_id").is_none());
         assert_eq!(event["data"]["revision"], 2);
     }
 }
