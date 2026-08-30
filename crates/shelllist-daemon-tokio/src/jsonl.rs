@@ -1,9 +1,11 @@
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde_json::Value;
 use shelllist_daemon_core::{ClientRequest, DaemonEndpoint};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::{CorrelationPolicy, JsonDbusClient, OutputCommand, OutputHandle, spawn_output_actor};
@@ -12,6 +14,8 @@ const OUTPUT_CAPACITY: usize = 64;
 const PENDING_EVENT_LIMIT: usize = 32;
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelMode {
@@ -33,20 +37,44 @@ pub struct JsonlClientConfig<P> {
     pub call_failure: CallFailureMapper,
 }
 
+#[derive(Clone)]
+struct ReconnectingClient {
+    endpoint: DaemonEndpoint,
+    current: Arc<Mutex<Option<JsonDbusClient>>>,
+}
+
+impl ReconnectingClient {
+    fn new(endpoint: DaemonEndpoint) -> Self {
+        Self {
+            endpoint,
+            current: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn get(&self) -> Result<JsonDbusClient> {
+        let mut current = self.current.lock().await;
+        if let Some(client) = current.as_ref() {
+            return Ok(client.clone());
+        }
+        let client = JsonDbusClient::session(self.endpoint).await?;
+        *current = Some(client.clone());
+        Ok(client)
+    }
+
+    async fn invalidate(&self) {
+        self.current.lock().await.take();
+    }
+}
+
 pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>) -> Result<()> {
-    let dbus = JsonDbusClient::session(config.endpoint).await.ok();
+    let dbus = ReconnectingClient::new(config.endpoint);
     let (output, output_task) =
         spawn_output_actor(config.correlation, OUTPUT_CAPACITY, PENDING_EVENT_LIMIT);
-    let event_task = dbus
-        .as_ref()
-        .map(|client| spawn_event_forwarder(client.clone(), output.clone()));
-    let owner_task = dbus
-        .as_ref()
-        .map(|client| spawn_owner_watcher(client.clone(), output.clone()));
+    let event_task = spawn_event_forwarder(dbus.clone(), output.clone());
 
     let mut calls = JoinSet::new();
     let shutdown_id = request_loop(
-        dbus.as_ref(),
+        &dbus,
         &output,
         &mut calls,
         config.cancel_mode,
@@ -54,14 +82,9 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
     )
     .await?;
     drain_calls(&mut calls).await;
-    cancel_active(dbus.as_ref(), &output, config.cancel_mode).await;
+    cancel_active(&dbus, &output, config.cancel_mode).await;
 
-    if let Some(task) = event_task {
-        task.abort();
-    }
-    if let Some(task) = owner_task {
-        task.abort();
-    }
+    event_task.abort();
     if let Some(id) = shutdown_id {
         output.send(OutputCommand::Shutdown(id)).await?;
     }
@@ -73,7 +96,7 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
 }
 
 async fn request_loop(
-    dbus: Option<&JsonDbusClient>,
+    dbus: &ReconnectingClient,
     output: &OutputHandle,
     calls: &mut JoinSet<()>,
     cancel_mode: CancelMode,
@@ -99,7 +122,7 @@ async fn request_loop(
         wait_for_request_slot(calls).await;
         spawn_request(
             calls,
-            dbus.cloned(),
+            dbus.clone(),
             output.clone(),
             request,
             cancel_mode,
@@ -112,7 +135,7 @@ async fn request_loop(
 
 fn spawn_request(
     calls: &mut JoinSet<()>,
-    dbus: Option<JsonDbusClient>,
+    dbus: ReconnectingClient,
     output: OutputHandle,
     request: ClientRequest,
     cancel_mode: CancelMode,
@@ -121,31 +144,31 @@ fn spawn_request(
     calls.spawn(async move {
         let (id, result, cancelled_request_id) = match request {
             ClientRequest::Call { id, method, params } => {
-                let result = match dbus.as_ref() {
-                    Some(dbus) => dbus.call(&method, params).await,
-                    None => Err(anyhow!("session D-Bus unavailable")),
-                }
-                .map_err(|error| call_failure(&method, &error))
-                .or_else(|failure| match failure {
-                    CallFailure::Api(response) => Ok(response),
-                    CallFailure::Transport(error) => Err(error),
-                });
+                let result = match dbus.get().await {
+                    Ok(client) => client.call(&method, params).await,
+                    Err(error) => Err(error),
+                };
+                let result = result
+                    .map_err(|error| call_failure(&method, &error))
+                    .or_else(|failure| match failure {
+                        CallFailure::Api(response) => Ok(response),
+                        CallFailure::Transport(error) => Err(error),
+                    });
                 (id, result, None)
             }
             ClientRequest::Subscribe { id, streams } => {
-                let result = match dbus.as_ref() {
-                    Some(dbus) => dbus.subscribe(streams).await,
-                    None => Err(anyhow!("session D-Bus unavailable")),
-                }
-                .map_err(|error| error.to_string());
-                (id, result, None)
+                let result = match dbus.get().await {
+                    Ok(client) => client.subscribe(streams).await,
+                    Err(error) => Err(error),
+                };
+                (id, result.map_err(|error| error.to_string()), None)
             }
             ClientRequest::Cancel { id, request_id } => {
-                let result = match dbus.as_ref() {
-                    Some(dbus) => cancel(dbus, &request_id, cancel_mode).await,
-                    None => Err(anyhow!("session D-Bus unavailable")),
-                }
-                .map_err(|error| error.to_string());
+                let result = match dbus.get().await {
+                    Ok(client) => cancel(&client, &request_id, cancel_mode).await,
+                    Err(error) => Err(error),
+                };
+                let result = result.map_err(|error| error.to_string());
                 let cancelled = result.as_ref().ok().map(|_| request_id);
                 (id, result, cancelled)
             }
@@ -168,31 +191,32 @@ async fn cancel(dbus: &JsonDbusClient, request_id: &str, mode: CancelMode) -> Re
     }
 }
 
-fn spawn_event_forwarder(dbus: JsonDbusClient, output: OutputHandle) -> JoinHandle<()> {
+fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = dbus.forward_events(&output).await {
-            let _ = output
-                .send(OutputCommand::TransportError(error.to_string()))
-                .await;
-        }
-    })
-}
-
-fn spawn_owner_watcher(dbus: JsonDbusClient, output: OutputHandle) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        match dbus.watch_replacement().await {
-            Ok(()) => {
-                let _ = output
-                    .send(OutputCommand::TransportError(
-                        "daemon restarted; reconnecting".into(),
-                    ))
-                    .await;
+        let mut delay = INITIAL_RECONNECT_DELAY;
+        let mut last_error = None;
+        loop {
+            let result = match dbus.get().await {
+                Ok(client) => client.forward_events(&output).await,
+                Err(error) => Err(error),
+            };
+            let message = match result {
+                Ok(()) => "daemon event forwarding stopped".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            if last_error.as_deref() != Some(message.as_str()) {
+                if output
+                    .send(OutputCommand::TransportError(message.clone()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                last_error = Some(message);
             }
-            Err(error) => {
-                let _ = output
-                    .send(OutputCommand::TransportError(error.to_string()))
-                    .await;
-            }
+            dbus.invalidate().await;
+            tokio::time::sleep(delay).await;
+            delay = delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
         }
     })
 }
@@ -235,11 +259,11 @@ async fn drain_calls(calls: &mut JoinSet<()>) {
     }
 }
 
-async fn cancel_active(dbus: Option<&JsonDbusClient>, output: &OutputHandle, mode: CancelMode) {
-    let Some(dbus) = dbus else {
+async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle, mode: CancelMode) {
+    let Ok(client) = dbus.get().await else {
         return;
     };
     for id in output.active_ids().await {
-        let _ = cancel(dbus, &id, mode).await;
+        let _ = cancel(&client, &id, mode).await;
     }
 }
