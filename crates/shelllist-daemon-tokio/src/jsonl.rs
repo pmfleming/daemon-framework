@@ -10,6 +10,7 @@ use crate::{CorrelationPolicy, JsonDbusClient, OutputCommand, OutputHandle, spaw
 
 const OUTPUT_CAPACITY: usize = 64;
 const PENDING_EVENT_LIMIT: usize = 32;
+const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,7 @@ async fn request_loop(
         if let ClientRequest::Shutdown { id } = request {
             return Ok(Some(id));
         }
+        wait_for_request_slot(calls).await;
         spawn_request(
             calls,
             dbus.cloned(),
@@ -193,6 +195,16 @@ fn spawn_owner_watcher(dbus: JsonDbusClient, output: OutputHandle) -> JoinHandle
             }
         }
     })
+}
+
+async fn wait_for_request_slot(calls: &mut JoinSet<()>) {
+    while calls.len() >= MAX_IN_FLIGHT_REQUESTS {
+        if let Some(result) = calls.join_next().await
+            && let Err(error) = result
+        {
+            tracing_log_join(error);
+        }
+    }
 }
 
 fn reap_finished(calls: &mut JoinSet<()>) {
