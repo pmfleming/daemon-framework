@@ -11,9 +11,6 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::{CorrelationPolicy, JsonDbusClient, OutputCommand, OutputHandle, spawn_output_actor};
 
 const OUTPUT_CAPACITY: usize = 64;
-const PENDING_EVENT_LIMIT: usize = 32;
-const MAX_IN_FLIGHT_REQUESTS: usize = 64;
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
@@ -35,6 +32,10 @@ pub struct JsonlClientConfig<P> {
     pub correlation: P,
     pub cancel_mode: CancelMode,
     pub call_failure: CallFailureMapper,
+    pub pending_event_limit: usize,
+    pub max_in_flight_requests: usize,
+    /// `None` drains every accepted request; a duration bounds graceful drain.
+    pub shutdown_timeout: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -68,8 +69,11 @@ impl ReconnectingClient {
 
 pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>) -> Result<()> {
     let dbus = ReconnectingClient::new(config.endpoint);
-    let (output, output_task) =
-        spawn_output_actor(config.correlation, OUTPUT_CAPACITY, PENDING_EVENT_LIMIT);
+    let (output, output_task) = spawn_output_actor(
+        config.correlation,
+        OUTPUT_CAPACITY,
+        config.pending_event_limit,
+    );
     let (event_ready, ready) = oneshot::channel();
     let event_task = spawn_event_forwarder(dbus.clone(), output.clone(), event_ready);
     let owner_task = spawn_owner_watcher(dbus.clone(), output.clone());
@@ -82,9 +86,10 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
         &mut calls,
         config.cancel_mode,
         config.call_failure,
+        config.max_in_flight_requests.max(1),
     )
     .await?;
-    drain_calls(&mut calls).await;
+    drain_calls(&mut calls, config.shutdown_timeout).await;
     cancel_active(&dbus, &output, config.cancel_mode).await;
 
     event_task.abort();
@@ -105,6 +110,7 @@ async fn request_loop(
     calls: &mut JoinSet<()>,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
+    max_in_flight_requests: usize,
 ) -> Result<Option<String>> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read JSONL request")? {
@@ -123,7 +129,7 @@ async fn request_loop(
         if let ClientRequest::Shutdown { id } = request {
             return Ok(Some(id));
         }
-        wait_for_request_slot(calls).await;
+        wait_for_request_slot(calls, max_in_flight_requests).await;
         spawn_request(
             calls,
             dbus.clone(),
@@ -277,8 +283,8 @@ fn spawn_owner_watcher(dbus: ReconnectingClient, output: OutputHandle) -> JoinHa
     })
 }
 
-async fn wait_for_request_slot(calls: &mut JoinSet<()>) {
-    while calls.len() >= MAX_IN_FLIGHT_REQUESTS {
+async fn wait_for_request_slot(calls: &mut JoinSet<()>, max_in_flight_requests: usize) {
+    while calls.len() >= max_in_flight_requests {
         if let Some(result) = calls.join_next().await {
             log_join_result(result);
         }
@@ -297,17 +303,19 @@ fn log_join_result(result: std::result::Result<(), tokio::task::JoinError>) {
     }
 }
 
-async fn drain_calls(calls: &mut JoinSet<()>) {
-    if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+async fn drain_calls(calls: &mut JoinSet<()>, timeout: Option<Duration>) {
+    let drain = async {
         while let Some(result) = calls.join_next().await {
             log_join_result(result);
         }
-    })
-    .await
-    .is_err()
-    {
-        calls.abort_all();
-        while calls.join_next().await.is_some() {}
+    };
+    if let Some(timeout) = timeout {
+        if tokio::time::timeout(timeout, drain).await.is_err() {
+            calls.abort_all();
+            while calls.join_next().await.is_some() {}
+        }
+    } else {
+        drain.await;
     }
 }
 
