@@ -185,12 +185,12 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
 
     use super::{
-        AtomicWritePolicy, TEMP_SEQUENCE, is_safe_relative_path, is_single_normal_component,
-        read_json, write_json_atomic,
+        AtomicWritePolicy, TEMP_SEQUENCE, absolute_path, is_safe_relative_path,
+        is_single_normal_component, read_json, write_json_atomic,
     };
 
     #[test]

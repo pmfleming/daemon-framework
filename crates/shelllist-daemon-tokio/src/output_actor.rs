@@ -413,9 +413,13 @@ mod tests {
         assert!(state.suppressed_ids.is_empty());
         assert!(state.active_ids.is_empty());
         assert!(state.pending_events.is_empty());
-        assert!(state.activate(&json!({
-            "data": { "subscription": { "id": "sub-1" } }
-        })).is_empty());
+        assert!(
+            state
+                .activate(&json!({
+                    "data": { "subscription": { "id": "sub-1" } }
+                }))
+                .is_empty()
+        );
         assert!(state.active_ids.contains("sub-1"));
     }
 
