@@ -123,39 +123,27 @@ pub async fn wait_for_owner_loss(
 }
 
 pub async fn wait_for_owner_name_loss(connection: &zbus::Connection, owner: &str) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        connection,
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        "org.freedesktop.DBus",
-    )
-    .await
-    .context("create D-Bus owner proxy")?;
-    let mut changes = proxy
-        .receive_signal("NameOwnerChanged")
-        .await
-        .context("receive D-Bus owner changes")?;
-    let has_owner: bool = proxy
-        .call("NameHasOwner", &(owner,))
-        .await
-        .context("check D-Bus owner")?;
-    if !has_owner {
-        return Ok(());
-    }
-    while let Some(message) = changes.next().await {
-        let (name, old_owner, new_owner): (String, String, String) =
-            message
-                .body()
-                .deserialize()
-                .context("decode owner change")?;
-        if name == owner && !old_owner.is_empty() && new_owner.is_empty() {
-            return Ok(());
-        }
-    }
-    anyhow::bail!("D-Bus owner-change stream ended")
+    wait_for_name_change(connection, owner, true, owner_lost).await
 }
 
 pub async fn watch_name_replacement(connection: &zbus::Connection, bus_name: &str) -> Result<()> {
+    wait_for_name_change(connection, bus_name, false, name_replaced).await
+}
+
+fn owner_lost(old_owner: &str, new_owner: &str) -> bool {
+    !old_owner.is_empty() && new_owner.is_empty()
+}
+
+fn name_replaced(old_owner: &str, new_owner: &str) -> bool {
+    !old_owner.is_empty() && old_owner != new_owner
+}
+
+async fn wait_for_name_change(
+    connection: &zbus::Connection,
+    watched_name: &str,
+    return_if_absent: bool,
+    matches: fn(&str, &str) -> bool,
+) -> Result<()> {
     let proxy = zbus::Proxy::new(
         connection,
         "org.freedesktop.DBus",
@@ -168,13 +156,22 @@ pub async fn watch_name_replacement(connection: &zbus::Connection, bus_name: &st
         .receive_signal("NameOwnerChanged")
         .await
         .context("receive D-Bus owner changes")?;
+    if return_if_absent {
+        let has_owner: bool = proxy
+            .call("NameHasOwner", &(watched_name,))
+            .await
+            .context("check D-Bus owner")?;
+        if !has_owner {
+            return Ok(());
+        }
+    }
     while let Some(message) = changes.next().await {
         let (name, old_owner, new_owner): (String, String, String) =
             message
                 .body()
                 .deserialize()
                 .context("decode owner change")?;
-        if name == bus_name && !old_owner.is_empty() && old_owner != new_owner {
+        if name == watched_name && matches(&old_owner, &new_owner) {
             return Ok(());
         }
     }

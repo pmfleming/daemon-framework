@@ -18,6 +18,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 nix flake check
+rqlens measure hotspots
 ```
 
 Run the search JSONL service with:

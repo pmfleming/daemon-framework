@@ -142,46 +142,58 @@ fn spawn_request(
     call_failure: CallFailureMapper,
 ) {
     calls.spawn(async move {
-        let (id, result, cancelled_request_id) = match request {
-            ClientRequest::Call { id, method, params } => {
-                let result = match dbus.get().await {
-                    Ok(client) => client.call(&method, params).await,
-                    Err(error) => Err(error),
-                };
-                let result = result
-                    .map_err(|error| call_failure(&method, &error))
-                    .or_else(|failure| match failure {
-                        CallFailure::Api(response) => Ok(response),
-                        CallFailure::Transport(error) => Err(error),
-                    });
-                (id, result, None)
-            }
-            ClientRequest::Subscribe { id, streams } => {
-                let result = match dbus.get().await {
-                    Ok(client) => client.subscribe(streams).await,
-                    Err(error) => Err(error),
-                };
-                (id, result.map_err(|error| error.to_string()), None)
-            }
-            ClientRequest::Cancel { id, request_id } => {
-                let result = match dbus.get().await {
-                    Ok(client) => cancel(&client, &request_id, cancel_mode).await,
-                    Err(error) => Err(error),
-                };
-                let result = result.map_err(|error| error.to_string());
-                let cancelled = result.as_ref().ok().map(|_| request_id);
-                (id, result, cancelled)
-            }
-            ClientRequest::Shutdown { .. } => unreachable!("shutdown is handled by request loop"),
-        };
-        let _ = output
-            .send(OutputCommand::Response {
-                id,
-                result,
-                cancelled_request_id,
-            })
-            .await;
+        let command = execute_request(dbus, request, cancel_mode, call_failure).await;
+        let _ = output.send(command).await;
     });
+}
+
+async fn execute_request(
+    dbus: ReconnectingClient,
+    request: ClientRequest,
+    cancel_mode: CancelMode,
+    call_failure: CallFailureMapper,
+) -> OutputCommand {
+    match request {
+        ClientRequest::Call { id, method, params } => {
+            let result = async { dbus.get().await?.call(&method, params).await }
+                .await
+                .map_err(|error| call_failure(&method, &error))
+                .or_else(|failure| match failure {
+                    CallFailure::Api(response) => Ok(response),
+                    CallFailure::Transport(error) => Err(error),
+                });
+            response_command(id, result, None)
+        }
+        ClientRequest::Subscribe { id, streams } => {
+            let result = async { dbus.get().await?.subscribe(streams).await }
+                .await
+                .map_err(|error| error.to_string());
+            response_command(id, result, None)
+        }
+        ClientRequest::Cancel { id, request_id } => {
+            let result = async {
+                let client = dbus.get().await?;
+                cancel(&client, &request_id, cancel_mode).await
+            }
+            .await
+            .map_err(|error| error.to_string());
+            let cancelled = result.as_ref().ok().map(|_| request_id);
+            response_command(id, result, cancelled)
+        }
+        ClientRequest::Shutdown { id } => OutputCommand::Shutdown(id),
+    }
+}
+
+fn response_command(
+    id: String,
+    result: std::result::Result<Value, String>,
+    cancelled_request_id: Option<String>,
+) -> OutputCommand {
+    OutputCommand::Response {
+        id,
+        result,
+        cancelled_request_id,
+    }
 }
 
 async fn cancel(dbus: &JsonDbusClient, request_id: &str, mode: CancelMode) -> Result<Value> {
@@ -196,23 +208,9 @@ fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> Join
         let mut delay = INITIAL_RECONNECT_DELAY;
         let mut last_error = None;
         loop {
-            let result = match dbus.get().await {
-                Ok(client) => client.forward_events(&output).await,
-                Err(error) => Err(error),
-            };
-            let message = match result {
-                Ok(()) => "daemon event forwarding stopped".to_owned(),
-                Err(error) => error.to_string(),
-            };
-            if last_error.as_deref() != Some(message.as_str()) {
-                if output
-                    .send(OutputCommand::TransportError(message.clone()))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                last_error = Some(message);
+            let message = event_forwarding_error(&dbus, &output).await;
+            if !report_transport_error(&output, &mut last_error, message).await {
+                return;
             }
             dbus.invalidate().await;
             tokio::time::sleep(delay).await;
@@ -221,34 +219,54 @@ fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> Join
     })
 }
 
+async fn event_forwarding_error(dbus: &ReconnectingClient, output: &OutputHandle) -> String {
+    let result = async { dbus.get().await?.forward_events(output).await }.await;
+    result.map_or_else(
+        |error| error.to_string(),
+        |()| "daemon event forwarding stopped".to_owned(),
+    )
+}
+
+async fn report_transport_error(
+    output: &OutputHandle,
+    last_error: &mut Option<String>,
+    message: String,
+) -> bool {
+    if last_error.as_deref() == Some(message.as_str()) {
+        return true;
+    }
+    let sent = output
+        .send(OutputCommand::TransportError(message.clone()))
+        .await
+        .is_ok();
+    *last_error = Some(message);
+    sent
+}
+
 async fn wait_for_request_slot(calls: &mut JoinSet<()>) {
     while calls.len() >= MAX_IN_FLIGHT_REQUESTS {
-        if let Some(result) = calls.join_next().await
-            && let Err(error) = result
-        {
-            tracing_log_join(error);
+        if let Some(result) = calls.join_next().await {
+            log_join_result(result);
         }
     }
 }
 
 fn reap_finished(calls: &mut JoinSet<()>) {
     while let Some(result) = calls.try_join_next() {
-        if let Err(error) = result {
-            tracing_log_join(error);
-        }
+        log_join_result(result);
     }
 }
 
-fn tracing_log_join(error: tokio::task::JoinError) {
-    tracing::warn!(%error, "daemon JSONL call task failed");
+fn log_join_result(result: std::result::Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result {
+        tracing::warn!(%error, "daemon JSONL call task failed");
+    }
 }
 
 async fn drain_calls(calls: &mut JoinSet<()>) {
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
         while let Some(result) = calls.join_next().await {
-            if let Err(error) = result {
-                tracing_log_join(error);
-            }
+            log_join_result(result);
         }
     })
     .await

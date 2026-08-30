@@ -1,0 +1,11 @@
+project_name = "daemon-framework"
+project_root = "."
+output_dir = "target/analysis"
+
+[rust]
+identity_resolution = "auto"
+
+[verification]
+workspace = true
+all_targets = true
+locked = true

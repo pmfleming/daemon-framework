@@ -56,17 +56,16 @@ pub fn shutdown_message(id: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    use super::*;
+    use super::{ClientRequest, shutdown_message};
 
     #[test]
-    fn request_defaults_and_wire_names_are_stable() {
+    fn request_defaults_and_wire_names_are_stable() -> serde_json::Result<()> {
         assert_eq!(
             serde_json::from_str::<ClientRequest>(
                 r#"{"op":"call","id":"1","method":"things.get"}"#
-            )
-            .unwrap(),
+            )?,
             ClientRequest::Call {
                 id: "1".into(),
                 method: "things.get".into(),
@@ -80,5 +79,6 @@ mod tests {
                 "response": { "shutdown": true }
             })
         );
+        Ok(())
     }
 }

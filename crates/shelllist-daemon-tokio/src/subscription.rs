@@ -88,7 +88,7 @@ impl Default for OwnedTaskRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::OwnedTaskRegistry;
 
     #[tokio::test]
     async fn cancellation_is_owner_scoped() {

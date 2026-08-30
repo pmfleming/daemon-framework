@@ -34,13 +34,14 @@ pub fn fixture_names<'a>(fixture: &'a Value, section: &str) -> Result<Vec<&'a st
 mod tests {
     use serde_json::json;
 
-    use super::*;
+    use super::{fixture_names, validate_unique_names};
 
     #[test]
-    fn validates_names_and_extracts_fixture_sections() {
+    fn validates_names_and_extracts_fixture_sections() -> Result<(), String> {
         assert!(validate_unique_names(&["one", "two"]).is_ok());
         assert!(validate_unique_names(&["one", "one"]).is_err());
         let fixture = json!({ "registry": { "methods": [{ "name": "one" }] } });
-        assert_eq!(fixture_names(&fixture, "methods").unwrap(), ["one"]);
+        assert_eq!(fixture_names(&fixture, "methods")?, ["one"]);
+        Ok(())
     }
 }

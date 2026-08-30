@@ -76,19 +76,18 @@ impl From<serde_json::Error> for StateError {
 
 #[must_use]
 pub fn resolve_xdg_root(root: XdgRoot) -> Option<PathBuf> {
-    let home = || env::var_os("HOME").map(PathBuf::from);
     match root {
-        XdgRoot::Config => env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home().map(|path| path.join(".config"))),
-        XdgRoot::State => env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home().map(|path| path.join(".local/state"))),
-        XdgRoot::Cache => env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home().map(|path| path.join(".cache"))),
+        XdgRoot::Config => xdg_home("XDG_CONFIG_HOME", ".config"),
+        XdgRoot::State => xdg_home("XDG_STATE_HOME", ".local/state"),
+        XdgRoot::Cache => xdg_home("XDG_CACHE_HOME", ".cache"),
         XdgRoot::Runtime => env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
     }
+}
+
+fn xdg_home(variable: &str, fallback: &str) -> Option<PathBuf> {
+    env::var_os(variable)
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)))
 }
 
 /// Resolves a path below one application's XDG directory.
@@ -178,8 +177,15 @@ fn write_and_replace<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::io;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
 
-    use super::*;
+    use super::{
+        AtomicWritePolicy, TEMP_SEQUENCE, is_safe_relative_path, is_single_normal_component,
+        read_json, write_json_atomic,
+    };
 
     #[test]
     fn xdg_suffixes_cannot_escape_the_application_directory() {
@@ -201,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn private_atomic_json_replaces_complete_files() {
+    fn private_atomic_json_replaces_complete_files() -> Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!(
             "daemon-framework-state-test-{}-{}",
             std::process::id(),
@@ -212,23 +218,21 @@ mod tests {
             &path,
             &BTreeMap::from([("one", 1)]),
             AtomicWritePolicy::PRIVATE,
-        )
-        .unwrap();
+        )?;
         write_json_atomic(
             &path,
             &BTreeMap::from([("two", 2)]),
             AtomicWritePolicy::PRIVATE,
-        )
-        .unwrap();
-        let value = read_json::<BTreeMap<String, i32>>(&path).unwrap().unwrap();
+        )?;
+        let value = read_json::<BTreeMap<String, i32>>(&path)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "state was not written"))?;
         assert_eq!(value, BTreeMap::from([("two".into(), 2)]));
-        assert!(!root.read_dir().unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".tmp")
-        }));
-        fs::remove_dir_all(root).unwrap();
+        let temporary_exists = root
+            .read_dir()?
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!temporary_exists);
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

@@ -38,7 +38,7 @@ impl CorrelationPolicy for BasicCorrelation {
             .pointer("/data/subscription/id")
             .and_then(Value::as_str)
             .map(|id| TrackedId {
-                id: id.to_string(),
+                id: id.to_owned(),
                 kind: TrackedKind::Subscription,
             })
     }
@@ -127,8 +127,9 @@ impl<P: CorrelationPolicy> OutputState<P> {
         if self.suppressed_ids.contains(&tracked.id) {
             return Vec::new();
         }
-        self.active_ids.insert(tracked.id.clone());
-        self.take_pending(&tracked.id)
+        let pending = self.take_pending(&tracked.id);
+        self.active_ids.insert(tracked.id);
+        pending
     }
 
     fn event_disposition(&self, stream: &str, event: &Value) -> EventDisposition {
@@ -248,31 +249,9 @@ where
                 id,
                 result,
                 cancelled_request_id,
-            } => {
-                let line = match &result {
-                    Ok(response) => response_message(&id, response.clone()),
-                    Err(error) => response_error_message(&id, error.clone()),
-                };
-                emit_line(&mut writer, &line).await?;
-                if let Some(cancelled) = cancelled_request_id {
-                    state.cancelled(&cancelled);
-                }
-                if let Ok(response) = result {
-                    for (stream, event) in state.activate(&response) {
-                        emit_line(&mut writer, &event_message(&stream, event.clone())).await?;
-                        state.emitted(&stream, &event);
-                    }
-                }
-            }
+            } => emit_response(&mut writer, &mut state, id, result, cancelled_request_id).await?,
             OutputCommand::Event { stream, event } => {
-                match state.event_disposition(&stream, &event) {
-                    EventDisposition::Emit => {
-                        emit_line(&mut writer, &event_message(&stream, event.clone())).await?;
-                        state.emitted(&stream, &event);
-                    }
-                    EventDisposition::Buffer(id) => state.buffer(id, stream, event),
-                    EventDisposition::Drop => {}
-                }
+                emit_event(&mut writer, &mut state, stream, event).await?;
             }
             OutputCommand::ProtocolError(error) => {
                 emit_line(&mut writer, &protocol_error_message(error)).await?;
@@ -291,6 +270,58 @@ where
     Ok(())
 }
 
+async fn emit_response<P, W>(
+    writer: &mut W,
+    state: &mut OutputState<P>,
+    id: String,
+    result: std::result::Result<Value, String>,
+    cancelled_request_id: Option<String>,
+) -> Result<()>
+where
+    P: CorrelationPolicy,
+    W: AsyncWrite + Unpin,
+{
+    if let Some(cancelled) = cancelled_request_id {
+        state.cancelled(&cancelled);
+    }
+    let (line, pending) = match result {
+        Ok(response) => {
+            let pending = state.activate(&response);
+            (response_message(&id, response), pending)
+        }
+        Err(error) => (response_error_message(&id, error), Vec::new()),
+    };
+    emit_line(writer, &line).await?;
+    for (stream, event) in pending {
+        state.emitted(&stream, &event);
+        emit_line(writer, &event_message(&stream, event)).await?;
+    }
+    Ok(())
+}
+
+async fn emit_event<P, W>(
+    writer: &mut W,
+    state: &mut OutputState<P>,
+    stream: String,
+    event: Value,
+) -> Result<()>
+where
+    P: CorrelationPolicy,
+    W: AsyncWrite + Unpin,
+{
+    match state.event_disposition(&stream, &event) {
+        EventDisposition::Emit => {
+            state.emitted(&stream, &event);
+            emit_line(writer, &event_message(&stream, event)).await
+        }
+        EventDisposition::Buffer(id) => {
+            state.buffer(id, stream, event);
+            Ok(())
+        }
+        EventDisposition::Drop => Ok(()),
+    }
+}
+
 async fn emit_line<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
     let mut bytes = serde_json::to_vec(value).context("serialize daemon JSON line")?;
     bytes.push(b'\n');
@@ -303,9 +334,28 @@ async fn emit_line<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Resu
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, duplex};
 
-    use super::*;
+    use super::{BasicCorrelation, OutputCommand, OutputState, spawn_output_actor_with_writer};
+
+    async fn render(commands: Vec<OutputCommand>) -> Result<Vec<Value>> {
+        let (writer, mut reader) = duplex(4096);
+        let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 4, writer);
+        for command in commands {
+            output.send(command).await?;
+        }
+        drop(output);
+        task.await??;
+
+        let mut text = String::new();
+        reader.read_to_string(&mut text).await?;
+        text.lines()
+            .map(serde_json::from_str)
+            .collect::<serde_json::Result<_>>()
+            .map_err(Into::into)
+    }
 
     #[test]
     fn pending_limit_counts_events_instead_of_correlation_ids() {
@@ -322,78 +372,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffers_subscription_events_until_the_response_is_written() {
-        let (writer, mut reader) = duplex(4096);
-        let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 4, writer);
-        output
-            .send(OutputCommand::Event {
+    async fn buffers_subscription_events_until_the_response_is_written() -> Result<()> {
+        let lines = render(vec![
+            OutputCommand::Event {
                 stream: "things.changed".into(),
-                event: serde_json::json!({
-                    "event": "subscribed", "subscription_id": "sub-1"
-                }),
-            })
-            .await
-            .unwrap();
-        output
-            .send(OutputCommand::Response {
+                event: json!({ "event": "subscribed", "subscription_id": "sub-1" }),
+            },
+            OutputCommand::Response {
                 id: "subscribe".into(),
-                result: Ok(serde_json::json!({
-                    "data": { "subscription": { "id": "sub-1" } }
-                })),
+                result: Ok(json!({ "data": { "subscription": { "id": "sub-1" } } })),
                 cancelled_request_id: None,
-            })
-            .await
-            .unwrap();
-        drop(output);
-        task.await.unwrap().unwrap();
-        let mut text = String::new();
-        reader.read_to_string(&mut text).await.unwrap();
-        let lines = text.lines().collect::<Vec<_>>();
+            },
+        ])
+        .await?;
+
         assert_eq!(lines.len(), 2);
-        assert_eq!(
-            serde_json::from_str::<Value>(lines[0]).unwrap()["kind"],
-            "response"
-        );
-        assert_eq!(
-            serde_json::from_str::<Value>(lines[1]).unwrap()["kind"],
-            "event"
-        );
+        assert_eq!(lines[0]["kind"], "response");
+        assert_eq!(lines[1]["kind"], "event");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn drops_late_events_after_cancellation() {
-        let (writer, mut reader) = duplex(4096);
-        let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 4, writer);
-        output
-            .send(OutputCommand::Response {
+    async fn drops_late_events_after_cancellation() -> Result<()> {
+        let lines = render(vec![
+            OutputCommand::Response {
                 id: "subscribe".into(),
-                result: Ok(serde_json::json!({
-                    "data": { "subscription": { "id": "sub-1" } }
-                })),
+                result: Ok(json!({ "data": { "subscription": { "id": "sub-1" } } })),
                 cancelled_request_id: None,
-            })
-            .await
-            .unwrap();
-        output
-            .send(OutputCommand::Response {
+            },
+            OutputCommand::Response {
                 id: "cancel".into(),
-                result: Ok(serde_json::json!({ "cancelled": "sub-1" })),
+                result: Ok(json!({ "cancelled": "sub-1" })),
                 cancelled_request_id: Some("sub-1".into()),
-            })
-            .await
-            .unwrap();
-        output
-            .send(OutputCommand::Event {
+            },
+            OutputCommand::Event {
                 stream: "things.changed".into(),
-                event: serde_json::json!({ "subscription_id": "sub-1" }),
-            })
-            .await
-            .unwrap();
-        drop(output);
-        task.await.unwrap().unwrap();
+                event: json!({ "subscription_id": "sub-1" }),
+            },
+        ])
+        .await?;
 
-        let mut text = String::new();
-        reader.read_to_string(&mut text).await.unwrap();
-        assert_eq!(text.lines().count(), 2);
+        assert_eq!(lines.len(), 2);
+        Ok(())
     }
 }

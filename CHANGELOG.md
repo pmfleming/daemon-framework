@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Reused established fuzzy matching and edit-distance implementations in the search service.
+- Reduced JSONL and output actor branching while preserving ordered output behavior.
+- Consolidated related core identity and envelope modules to improve locality.
+- Removed output cloning, repeated D-Bus watch logic, wildcard imports, and test panic paths.
+- Added a reproducible Rust Quality Lens configuration.
+
 ## 0.1.0
 
 - Added the `shelllist-daemon-core` runtime-independent crate.

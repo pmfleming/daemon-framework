@@ -2,16 +2,12 @@
 
 mod endpoint;
 mod envelope;
-mod event;
-mod id;
 mod jsonl_wire;
 mod protocol;
 mod state;
 
-pub use endpoint::{ApiIdentity, DaemonEndpoint};
-pub use envelope::{ApiError, error, success};
-pub use event::{Correlation, event_envelope};
-pub use id::IdSequence;
+pub use endpoint::{ApiIdentity, DaemonEndpoint, IdSequence};
+pub use envelope::{ApiError, Correlation, error, event_envelope, success};
 pub use jsonl_wire::{
     ClientRequest, event_message, protocol_error_message, response_error_message, response_message,
     shutdown_message, transport_error_message,
