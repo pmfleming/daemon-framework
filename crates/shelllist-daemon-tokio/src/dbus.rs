@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 use zbus::{message::Header, names::UniqueName, object_server::SignalEmitter};
 
 use shelllist_daemon_core::DaemonEndpoint;
@@ -81,12 +82,19 @@ impl JsonDbusClient {
         Ok(json!({ "cancelled": request_id }))
     }
 
-    pub async fn forward_events(&self, output: &OutputHandle) -> Result<()> {
+    pub async fn forward_events(
+        &self,
+        output: &OutputHandle,
+        ready: &mut Option<oneshot::Sender<()>>,
+    ) -> Result<()> {
         let proxy = self.proxy().await?;
         let mut events = proxy
             .receive_signal("Event")
             .await
             .context("receive daemon events")?;
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(());
+        }
         while let Some(message) = events.next().await {
             let (stream, event_json): (String, String) = message
                 .body()

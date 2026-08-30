@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use shelllist_daemon_core::{ClientRequest, DaemonEndpoint};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::{CorrelationPolicy, JsonDbusClient, OutputCommand, OutputHandle, spawn_output_actor};
@@ -70,8 +70,10 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
     let dbus = ReconnectingClient::new(config.endpoint);
     let (output, output_task) =
         spawn_output_actor(config.correlation, OUTPUT_CAPACITY, PENDING_EVENT_LIMIT);
-    let event_task = spawn_event_forwarder(dbus.clone(), output.clone());
+    let (event_ready, ready) = oneshot::channel();
+    let event_task = spawn_event_forwarder(dbus.clone(), output.clone(), event_ready);
     let owner_task = spawn_owner_watcher(dbus.clone(), output.clone());
+    ready.await.context("establish daemon event forwarding")?;
 
     let mut calls = JoinSet::new();
     let shutdown_id = request_loop(
@@ -205,12 +207,17 @@ async fn cancel(dbus: &JsonDbusClient, request_id: &str, mode: CancelMode) -> Re
     }
 }
 
-fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> JoinHandle<()> {
+fn spawn_event_forwarder(
+    dbus: ReconnectingClient,
+    output: OutputHandle,
+    ready: oneshot::Sender<()>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut delay = INITIAL_RECONNECT_DELAY;
         let mut last_error = None;
+        let mut ready = Some(ready);
         loop {
-            let message = event_forwarding_error(&dbus, &output).await;
+            let message = event_forwarding_error(&dbus, &output, &mut ready).await;
             if output.send(OutputCommand::ResetCorrelation).await.is_err()
                 || !report_transport_error(&output, &mut last_error, message).await
             {
@@ -223,8 +230,12 @@ fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> Join
     })
 }
 
-async fn event_forwarding_error(dbus: &ReconnectingClient, output: &OutputHandle) -> String {
-    let result = async { dbus.get().await?.forward_events(output).await }.await;
+async fn event_forwarding_error(
+    dbus: &ReconnectingClient,
+    output: &OutputHandle,
+    ready: &mut Option<oneshot::Sender<()>>,
+) -> String {
+    let result = async { dbus.get().await?.forward_events(output, ready).await }.await;
     result.map_or_else(
         |error| error.to_string(),
         |()| "daemon event forwarding stopped".to_owned(),
