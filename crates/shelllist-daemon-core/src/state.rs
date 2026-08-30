@@ -3,7 +3,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Serialize, de::DeserializeOwned};
@@ -91,9 +91,30 @@ pub fn resolve_xdg_root(root: XdgRoot) -> Option<PathBuf> {
     }
 }
 
+/// Resolves a path below one application's XDG directory.
+///
+/// The application must be one non-empty path component, and every component
+/// of `path` must be a normal relative component. Absolute paths, parent
+/// traversal, and empty paths are rejected.
 #[must_use]
 pub fn resolve_xdg_path(root: XdgRoot, application: &str, path: &Path) -> Option<PathBuf> {
+    let application = Path::new(application);
+    if !is_single_normal_component(application) || !is_safe_relative_path(path) {
+        return None;
+    }
     resolve_xdg_root(root).map(|base| base.join(application).join(path))
+}
+
+fn is_single_normal_component(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn is_safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StateError> {
@@ -159,6 +180,25 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn xdg_suffixes_cannot_escape_the_application_directory() {
+        assert!(is_single_normal_component(Path::new("shelllist")));
+        assert!(is_safe_relative_path(Path::new("daemon/state.json")));
+
+        for application in ["", ".", "..", "shelllist/daemon", "/shelllist"] {
+            assert!(!is_single_normal_component(Path::new(application)));
+        }
+        for path in [
+            "",
+            ".",
+            "../state.json",
+            "daemon/../../state.json",
+            "/tmp/state.json",
+        ] {
+            assert!(!is_safe_relative_path(Path::new(path)));
+        }
+    }
 
     #[test]
     fn private_atomic_json_replaces_complete_files() {
