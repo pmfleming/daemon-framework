@@ -68,6 +68,7 @@ pub enum OutputCommand {
     ProtocolError(String),
     TransportError(String),
     ActiveIds(oneshot::Sender<Vec<String>>),
+    ResetCorrelation,
     Shutdown(String),
 }
 
@@ -202,6 +203,13 @@ impl<P: CorrelationPolicy> OutputState<P> {
         ids.sort();
         ids
     }
+
+    fn reset_correlation(&mut self) {
+        self.active_ids.clear();
+        self.pending_events.clear();
+        self.suppressed_ids.clear();
+        self.suppressed_order.clear();
+    }
 }
 
 #[must_use]
@@ -262,6 +270,7 @@ where
             OutputCommand::ActiveIds(reply) => {
                 let _ = reply.send(state.active_ids());
             }
+            OutputCommand::ResetCorrelation => state.reset_correlation(),
             OutputCommand::Shutdown(id) => {
                 emit_line(&mut writer, &shutdown_message(&id)).await?;
             }
@@ -390,6 +399,24 @@ mod tests {
         assert_eq!(lines[0]["kind"], "response");
         assert_eq!(lines[1]["kind"], "event");
         Ok(())
+    }
+
+    #[test]
+    fn reset_allows_reused_ids_after_daemon_replacement() {
+        let mut state = OutputState::new(BasicCorrelation, 4);
+        state.suppress("sub-1".into());
+        state.active_ids.insert("sub-2".into());
+        state.buffer("sub-3".into(), "things.changed".into(), json!({}));
+
+        state.reset_correlation();
+
+        assert!(state.suppressed_ids.is_empty());
+        assert!(state.active_ids.is_empty());
+        assert!(state.pending_events.is_empty());
+        assert!(state.activate(&json!({
+            "data": { "subscription": { "id": "sub-1" } }
+        })).is_empty());
+        assert!(state.active_ids.contains("sub-1"));
     }
 
     #[tokio::test]

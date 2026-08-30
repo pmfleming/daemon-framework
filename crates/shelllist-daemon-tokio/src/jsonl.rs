@@ -71,6 +71,7 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
     let (output, output_task) =
         spawn_output_actor(config.correlation, OUTPUT_CAPACITY, PENDING_EVENT_LIMIT);
     let event_task = spawn_event_forwarder(dbus.clone(), output.clone());
+    let owner_task = spawn_owner_watcher(dbus.clone(), output.clone());
 
     let mut calls = JoinSet::new();
     let shutdown_id = request_loop(
@@ -85,6 +86,7 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
     cancel_active(&dbus, &output, config.cancel_mode).await;
 
     event_task.abort();
+    owner_task.abort();
     if let Some(id) = shutdown_id {
         output.send(OutputCommand::Shutdown(id)).await?;
     }
@@ -209,7 +211,9 @@ fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> Join
         let mut last_error = None;
         loop {
             let message = event_forwarding_error(&dbus, &output).await;
-            if !report_transport_error(&output, &mut last_error, message).await {
+            if output.send(OutputCommand::ResetCorrelation).await.is_err()
+                || !report_transport_error(&output, &mut last_error, message).await
+            {
                 return;
             }
             dbus.invalidate().await;
@@ -241,6 +245,25 @@ async fn report_transport_error(
         .is_ok();
     *last_error = Some(message);
     sent
+}
+
+fn spawn_owner_watcher(dbus: ReconnectingClient, output: OutputHandle) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let result = async { dbus.get().await?.watch_replacement().await }.await;
+            match result {
+                Ok(()) => {
+                    if output.send(OutputCommand::ResetCorrelation).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "daemon owner watcher stopped");
+                    tokio::time::sleep(INITIAL_RECONNECT_DELAY).await;
+                }
+            }
+        }
+    })
 }
 
 async fn wait_for_request_slot(calls: &mut JoinSet<()>) {
