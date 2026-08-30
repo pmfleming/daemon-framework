@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use shelllist_daemon_core::{ClientRequest, DaemonEndpoint};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::{CorrelationPolicy, JsonDbusClient, OutputCommand, OutputHandle, spawn_output_actor};
@@ -42,13 +42,16 @@ pub struct JsonlClientConfig<P> {
 struct ReconnectingClient {
     endpoint: DaemonEndpoint,
     current: Arc<Mutex<Option<JsonDbusClient>>>,
+    event_ready: watch::Sender<bool>,
 }
 
 impl ReconnectingClient {
     fn new(endpoint: DaemonEndpoint) -> Self {
+        let (event_ready, _) = watch::channel(false);
         Self {
             endpoint,
             current: Arc::new(Mutex::new(None)),
+            event_ready,
         }
     }
 
@@ -63,7 +66,19 @@ impl ReconnectingClient {
     }
 
     async fn invalidate(&self) {
+        let _ = self.event_ready.send(false);
         self.current.lock().await.take();
+    }
+
+    async fn wait_for_event_forwarding(&self) -> Result<()> {
+        let mut ready = self.event_ready.subscribe();
+        while !*ready.borrow_and_update() {
+            ready
+                .changed()
+                .await
+                .context("daemon event readiness channel closed")?;
+        }
+        Ok(())
     }
 }
 
@@ -175,9 +190,12 @@ async fn execute_request(
             response_command(id, result, None)
         }
         ClientRequest::Subscribe { id, streams } => {
-            let result = async { dbus.get().await?.subscribe(streams).await }
-                .await
-                .map_err(|error| error.to_string());
+            let result = async {
+                dbus.wait_for_event_forwarding().await?;
+                dbus.get().await?.subscribe(streams).await
+            }
+            .await
+            .map_err(|error| error.to_string());
             response_command(id, result, None)
         }
         ClientRequest::Cancel { id, request_id } => {
@@ -223,6 +241,7 @@ fn spawn_event_forwarder(
         let mut last_error = None;
         let mut ready = Some(ready);
         loop {
+            let _ = dbus.event_ready.send(false);
             let message = event_forwarding_error(&dbus, &output, &mut ready).await;
             if output.send(OutputCommand::ResetCorrelation).await.is_err()
                 || !report_transport_error(&output, &mut last_error, message).await
@@ -241,7 +260,13 @@ async fn event_forwarding_error(
     output: &OutputHandle,
     ready: &mut Option<oneshot::Sender<()>>,
 ) -> String {
-    let result = async { dbus.get().await?.forward_events(output, ready).await }.await;
+    let result = async {
+        dbus.get()
+            .await?
+            .forward_events(output, ready, &dbus.event_ready)
+            .await
+    }
+    .await;
     result.map_or_else(
         |error| error.to_string(),
         |()| "daemon event forwarding stopped".to_owned(),

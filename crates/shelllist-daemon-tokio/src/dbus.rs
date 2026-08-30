@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use zbus::{message::Header, names::UniqueName, object_server::SignalEmitter};
 
 use shelllist_daemon_core::DaemonEndpoint;
@@ -86,12 +86,14 @@ impl JsonDbusClient {
         &self,
         output: &OutputHandle,
         ready: &mut Option<oneshot::Sender<()>>,
+        generation_ready: &watch::Sender<bool>,
     ) -> Result<()> {
         let proxy = self.proxy().await?;
         let mut events = proxy
             .receive_signal("Event")
             .await
             .context("receive daemon events")?;
+        let _ = generation_ready.send(true);
         if let Some(ready) = ready.take() {
             let _ = ready.send(());
         }
