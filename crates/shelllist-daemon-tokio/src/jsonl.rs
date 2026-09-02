@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,7 +6,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use shelllist_daemon_core::{ClientRequest, DaemonEndpoint};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::{CorrelationPolicy, JsonDbusClient, OutputCommand, OutputHandle, spawn_output_actor};
@@ -13,6 +14,8 @@ use crate::{CorrelationPolicy, JsonDbusClient, OutputCommand, OutputHandle, spaw
 const OUTPUT_CAPACITY: usize = 64;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelMode {
@@ -93,13 +96,14 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
     let owner_task = spawn_owner_watcher(dbus.clone(), output.clone());
 
     let mut calls = JoinSet::new();
+    let request_slots = Arc::new(Semaphore::new(config.max_in_flight_requests.max(1)));
     let shutdown_id = request_loop(
         &dbus,
         &output,
         &mut calls,
         config.cancel_mode,
         config.call_failure,
-        config.max_in_flight_requests.max(1),
+        request_slots,
     )
     .await?;
     drain_calls(&mut calls, config.shutdown_timeout).await;
@@ -123,7 +127,7 @@ async fn request_loop(
     calls: &mut JoinSet<()>,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
-    max_in_flight_requests: usize,
+    request_slots: Arc<Semaphore>,
 ) -> Result<Option<String>> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read JSONL request")? {
@@ -142,7 +146,6 @@ async fn request_loop(
         if let ClientRequest::Shutdown { id } = request {
             return Ok(Some(id));
         }
-        wait_for_request_slot(calls, max_in_flight_requests).await;
         spawn_request(
             calls,
             dbus.clone(),
@@ -150,6 +153,7 @@ async fn request_loop(
             request,
             cancel_mode,
             call_failure,
+            Arc::clone(&request_slots),
         );
         reap_finished(calls);
     }
@@ -163,8 +167,16 @@ fn spawn_request(
     request: ClientRequest,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
+    request_slots: Arc<Semaphore>,
 ) {
     calls.spawn(async move {
+        // Cancellation is control-plane traffic: it must not wait behind calls it
+        // is intended to cancel. Ordinary calls and subscriptions remain bounded.
+        let _permit = if request_uses_slot(&request) {
+            request_slots.acquire_owned().await.ok()
+        } else {
+            None
+        };
         let command = execute_request(dbus, request, cancel_mode, call_failure).await;
         let _ = output.send(command).await;
     });
@@ -178,7 +190,9 @@ async fn execute_request(
 ) -> OutputCommand {
     match request {
         ClientRequest::Call { id, method, params } => {
-            let result = async { dbus.get().await?.call(&method, params).await }
+            let result = with_transport_timeout(&dbus, REQUEST_TIMEOUT, async {
+                dbus.get().await?.call(&method, params).await
+            })
                 .await
                 .map_err(|error| call_failure(&method, &error))
                 .or_else(|failure| match failure {
@@ -188,25 +202,43 @@ async fn execute_request(
             response_command(id, result, None)
         }
         ClientRequest::Subscribe { id, streams } => {
-            let result = async {
+            let result = with_transport_timeout(&dbus, REQUEST_TIMEOUT, async {
                 dbus.wait_for_event_forwarding().await?;
                 dbus.get().await?.subscribe(streams).await
-            }
+            })
             .await
             .map_err(|error| error.to_string());
             response_command(id, result, None)
         }
         ClientRequest::Cancel { id, request_id } => {
-            let result = async {
+            let result = with_transport_timeout(&dbus, CONTROL_TIMEOUT, async {
                 let client = dbus.get().await?;
                 cancel(&client, &request_id, cancel_mode).await
-            }
+            })
             .await
             .map_err(|error| error.to_string());
             let cancelled = result.as_ref().ok().map(|_| request_id);
             response_command(id, result, cancelled)
         }
         ClientRequest::Shutdown { id } => OutputCommand::Shutdown(id),
+    }
+}
+
+fn request_uses_slot(request: &ClientRequest) -> bool {
+    matches!(request, ClientRequest::Call { .. } | ClientRequest::Subscribe { .. })
+}
+
+async fn with_transport_timeout<T>(
+    dbus: &ReconnectingClient,
+    timeout: Duration,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => {
+            dbus.invalidate().await;
+            anyhow::bail!("daemon request timed out after {}ms", timeout.as_millis())
+        }
     }
 }
 
@@ -297,14 +329,6 @@ fn spawn_owner_watcher(dbus: ReconnectingClient, output: OutputHandle) -> JoinHa
     })
 }
 
-async fn wait_for_request_slot(calls: &mut JoinSet<()>, max_in_flight_requests: usize) {
-    while calls.len() >= max_in_flight_requests {
-        if let Some(result) = calls.join_next().await {
-            log_join_result(result);
-        }
-    }
-}
-
 fn reap_finished(calls: &mut JoinSet<()>) {
     while let Some(result) = calls.try_join_next() {
         log_join_result(result);
@@ -339,5 +363,33 @@ async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle, mode: C
     };
     for id in output.active_ids().await {
         let _ = cancel(&client, &id, mode).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use shelllist_daemon_core::ClientRequest;
+
+    use super::request_uses_slot;
+
+    #[test]
+    fn cancellation_bypasses_request_slots() {
+        assert!(!request_uses_slot(&ClientRequest::Cancel {
+            id: "cancel".into(),
+            request_id: "slow-call".into(),
+        }));
+        assert!(!request_uses_slot(&ClientRequest::Shutdown {
+            id: "shutdown".into(),
+        }));
+        assert!(request_uses_slot(&ClientRequest::Call {
+            id: "call".into(),
+            method: "status".into(),
+            params: json!({}),
+        }));
+        assert!(request_uses_slot(&ClientRequest::Subscribe {
+            id: "sub".into(),
+            streams: vec!["status".into()],
+        }));
     }
 }
