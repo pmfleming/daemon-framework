@@ -66,7 +66,7 @@ impl ReconnectingClient {
     }
 
     async fn invalidate(&self) {
-        let _ = self.event_ready.send(false);
+        self.event_ready.send_replace(false);
         self.current.lock().await.take();
     }
 
@@ -234,7 +234,7 @@ fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> Join
         let mut delay = INITIAL_RECONNECT_DELAY;
         let mut last_error = None;
         loop {
-            let _ = dbus.event_ready.send(false);
+            dbus.event_ready.send_replace(false);
             let message = event_forwarding_error(&dbus, &output).await;
             if output.send(OutputCommand::ResetCorrelation).await.is_err()
                 || !report_transport_error(&output, &mut last_error, message).await

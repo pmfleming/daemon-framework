@@ -92,7 +92,7 @@ impl JsonDbusClient {
             .receive_signal("Event")
             .await
             .context("receive daemon events")?;
-        let _ = generation_ready.send(true);
+        mark_events_ready(generation_ready);
         while let Some(message) = events.next().await {
             let (stream, event_json): (String, String) = message
                 .body()
@@ -134,6 +134,12 @@ pub async fn wait_for_owner_name_loss(connection: &zbus::Connection, owner: &str
 
 pub async fn watch_name_replacement(connection: &zbus::Connection, bus_name: &str) -> Result<()> {
     wait_for_name_change(connection, bus_name, false, name_replaced).await
+}
+
+fn mark_events_ready(ready: &watch::Sender<bool>) {
+    // Event forwarding can be established before the first subscription starts
+    // waiting. `send_replace` retains readiness when no receivers exist yet.
+    ready.send_replace(true);
 }
 
 fn owner_lost(old_owner: &str, new_owner: &str) -> bool {
@@ -182,4 +188,21 @@ async fn wait_for_name_change(
         }
     }
     anyhow::bail!("D-Bus owner-change stream ended")
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::watch;
+
+    use super::mark_events_ready;
+
+    #[test]
+    fn event_readiness_is_retained_until_a_subscription_waits() {
+        let (ready, initial_receiver) = watch::channel(false);
+        drop(initial_receiver);
+
+        mark_events_ready(&ready);
+
+        assert!(*ready.subscribe().borrow());
+    }
 }
