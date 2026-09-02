@@ -1,12 +1,14 @@
 # daemon-framework
 
-Shared Rust infrastructure and process services for the Shelllist daemon family.
+Shared Rust infrastructure for the Shelllist daemon family.
 
 ## Workspace crates
 
 - `shelllist-daemon-core` — runtime-independent protocol, envelope, JSONL wire, fixture, and secure state helpers.
 - `shelllist-daemon-tokio` — Tokio and session D-Bus transport, ordered output, ownership, subscription, and shutdown helpers.
-- `shelllist-search` — typo-tolerant fuzzy result ranking process used by Shelllist.
+- `shelllist-protocol-js` — build tool that generates frontend constants from daemon-owned protocol registries.
+
+The Shelllist-owned fuzzy ranking process lives with the frontend. Domain policy and frontend ranking do not belong in this infrastructure workspace.
 
 Domain policy remains in `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon`, and `nm-daemon`. This workspace contains only reusable process infrastructure and services.
 
@@ -21,10 +23,8 @@ nix flake check
 rqlens measure hotspots
 ```
 
-Run the search JSONL service with:
+Generate a JavaScript protocol binding by piping a daemon registry to:
 
 ```bash
-nix run .#shelllistSearch
+nix run .#protocolBindings
 ```
-
-Each input line is one search request and each output line is its ranked key response.

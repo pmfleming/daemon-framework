@@ -1,5 +1,5 @@
 {
-  description = "Shared Rust infrastructure and process services for Shelllist daemons";
+  description = "Shared Rust infrastructure for Shelllist daemons";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -12,32 +12,32 @@
       packages = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
-          shelllistSearch = pkgs.rustPlatform.buildRustPackage {
-            pname = "shelllist-search";
+          protocolBindings = pkgs.rustPlatform.buildRustPackage {
+            pname = "shelllist-protocol-js";
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
-            cargoBuildFlags = [ "-p" "shelllist-search" ];
-            cargoTestFlags = [ "-p" "shelllist-search" ];
+            cargoBuildFlags = [ "-p" "shelllist-daemon-core" "--bin" "shelllist-protocol-js" ];
+            cargoTestFlags = [ "-p" "shelllist-daemon-core" "--bin" "shelllist-protocol-js" ];
             meta = {
-              description = "Typo-tolerant fuzzy result ranking for Shelllist";
+              description = "Generate Shelllist JavaScript bindings from daemon protocol registries";
               homepage = "https://github.com/pmfleming/daemon-framework";
               license = pkgs.lib.licenses.mit;
-              mainProgram = "shelllist-search";
+              mainProgram = "shelllist-protocol-js";
               platforms = pkgs.lib.platforms.linux;
             };
           };
         in
         {
-          inherit shelllistSearch;
-          default = shelllistSearch;
+          inherit protocolBindings;
+          default = protocolBindings;
         });
 
       checks = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
         in {
-          shelllistSearch = self.packages.${system}.shelllistSearch;
+          protocolBindings = self.packages.${system}.protocolBindings;
           workspace = pkgs.rustPlatform.buildRustPackage {
             pname = "daemon-framework-workspace-check";
             version = "0.1.0";
@@ -50,11 +50,11 @@
         });
 
       apps = forAllSystems (system: {
-        shelllistSearch = {
+        protocolBindings = {
           type = "app";
-          program = "${self.packages.${system}.shelllistSearch}/bin/shelllist-search";
+          program = "${self.packages.${system}.protocolBindings}/bin/shelllist-protocol-js";
         };
-        default = self.apps.${system}.shelllistSearch;
+        default = self.apps.${system}.protocolBindings;
       });
 
       formatter = forAllSystems (system:

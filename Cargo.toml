@@ -3,7 +3,6 @@ resolver = "3"
 members = [
   "crates/shelllist-daemon-core",
   "crates/shelllist-daemon-tokio",
-  "crates/shelllist-search",
 ]
 
 [workspace.package]
