@@ -1,12 +1,89 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::{OnceCell, broadcast, watch};
 use zbus::{message::Header, names::UniqueName, object_server::SignalEmitter};
 
 use shelllist_daemon_core::DaemonEndpoint;
 
 use crate::{OutputCommand, OutputHandle};
+
+static OWNER_LOSSES: OnceCell<OwnerLossMonitor> = OnceCell::const_new();
+
+struct OwnerLossMonitor {
+    connection: zbus::Connection,
+    losses: broadcast::Sender<String>,
+}
+
+impl OwnerLossMonitor {
+    async fn start(connection: &zbus::Connection) -> Result<Self> {
+        let proxy = dbus_proxy(connection).await?;
+        let mut changes = proxy
+            .receive_signal("NameOwnerChanged")
+            .await
+            .context("receive D-Bus owner changes")?;
+        let (losses, _) = broadcast::channel(64);
+        let publisher = losses.clone();
+        tokio::spawn(async move {
+            while let Some(message) = changes.next().await {
+                let Ok((name, old_owner, new_owner)) =
+                    message.body().deserialize::<(String, String, String)>()
+                else {
+                    continue;
+                };
+                if name.starts_with(':') && owner_lost(&old_owner, &new_owner) {
+                    let _ = publisher.send(name);
+                }
+            }
+            tracing::warn!("shared D-Bus owner monitor stopped");
+        });
+        Ok(Self {
+            connection: connection.clone(),
+            losses,
+        })
+    }
+
+    async fn wait(&self, owner: &str) -> Result<()> {
+        // Subscribe before checking current ownership to close the check/wait race.
+        let mut losses = self.losses.subscribe();
+        if !name_has_owner(&self.connection, owner).await? {
+            return Ok(());
+        }
+        loop {
+            match losses.recv().await {
+                Ok(lost) if lost == owner => return Ok(()),
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if !name_has_owner(&self.connection, owner).await? {
+                        return Ok(());
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    anyhow::bail!("shared D-Bus owner monitor stopped")
+                }
+            }
+        }
+    }
+}
+
+async fn dbus_proxy(connection: &zbus::Connection) -> Result<zbus::Proxy<'_>> {
+    zbus::Proxy::new(
+        connection,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+    )
+    .await
+    .context("create D-Bus owner proxy")
+}
+
+async fn name_has_owner(connection: &zbus::Connection, owner: &str) -> Result<bool> {
+    dbus_proxy(connection)
+        .await?
+        .call("NameHasOwner", &(owner,))
+        .await
+        .context("check D-Bus owner")
+}
 
 #[derive(Clone)]
 pub struct JsonDbusClient {
@@ -129,7 +206,11 @@ pub async fn wait_for_owner_loss(
 }
 
 pub async fn wait_for_owner_name_loss(connection: &zbus::Connection, owner: &str) -> Result<()> {
-    wait_for_name_change(connection, owner, true, owner_lost).await
+    OWNER_LOSSES
+        .get_or_try_init(|| OwnerLossMonitor::start(connection))
+        .await?
+        .wait(owner)
+        .await
 }
 
 pub async fn watch_name_replacement(connection: &zbus::Connection, bus_name: &str) -> Result<()> {
@@ -156,14 +237,7 @@ async fn wait_for_name_change(
     return_if_absent: bool,
     matches: fn(&str, &str) -> bool,
 ) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        connection,
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        "org.freedesktop.DBus",
-    )
-    .await
-    .context("create D-Bus owner proxy")?;
+    let proxy = dbus_proxy(connection).await?;
     let mut changes = proxy
         .receive_signal("NameOwnerChanged")
         .await
