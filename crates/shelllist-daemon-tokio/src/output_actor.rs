@@ -74,12 +74,18 @@ pub enum OutputCommand {
 
 #[derive(Clone)]
 pub struct OutputHandle {
-    sender: mpsc::Sender<OutputCommand>,
+    priority_sender: mpsc::Sender<OutputCommand>,
+    event_sender: mpsc::Sender<OutputCommand>,
 }
 
 impl OutputHandle {
     pub async fn send(&self, command: OutputCommand) -> Result<()> {
-        self.sender
+        let sender = if matches!(command, OutputCommand::Event { .. }) {
+            &self.event_sender
+        } else {
+            &self.priority_sender
+        };
+        sender
             .send(command)
             .await
             .context("send daemon output command")
@@ -232,10 +238,15 @@ where
     P: CorrelationPolicy,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let (sender, receiver) = mpsc::channel(capacity);
-    let handle = OutputHandle { sender };
+    let (priority_sender, priority_receiver) = mpsc::channel(capacity);
+    let (event_sender, event_receiver) = mpsc::channel(capacity);
+    let handle = OutputHandle {
+        priority_sender,
+        event_sender,
+    };
     let task = tokio::spawn(run_output_actor(
-        receiver,
+        priority_receiver,
+        event_receiver,
         writer,
         OutputState::new(policy, pending_limit),
     ));
@@ -243,7 +254,8 @@ where
 }
 
 async fn run_output_actor<P, W>(
-    mut commands: mpsc::Receiver<OutputCommand>,
+    mut priority_commands: mpsc::Receiver<OutputCommand>,
+    mut events: mpsc::Receiver<OutputCommand>,
     mut writer: W,
     mut state: OutputState<P>,
 ) -> Result<()>
@@ -251,7 +263,27 @@ where
     P: CorrelationPolicy,
     W: AsyncWrite + Unpin,
 {
-    while let Some(command) = commands.recv().await {
+    let mut priority_closed = false;
+    let mut events_closed = false;
+    while !priority_closed || !events_closed {
+        let command = tokio::select! {
+            biased;
+            command = priority_commands.recv(), if !priority_closed => {
+                match command {
+                    Some(command) => Some(command),
+                    None => { priority_closed = true; None }
+                }
+            }
+            command = events.recv(), if !events_closed => {
+                match command {
+                    Some(command) => Some(command),
+                    None => { events_closed = true; None }
+                }
+            }
+        };
+        let Some(command) = command else {
+            continue;
+        };
         match command {
             OutputCommand::Response {
                 id,
@@ -346,8 +378,12 @@ mod tests {
     use anyhow::Result;
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, duplex};
+    use tokio::sync::mpsc;
 
-    use super::{BasicCorrelation, OutputCommand, OutputState, spawn_output_actor_with_writer};
+    use super::{
+        BasicCorrelation, OutputCommand, OutputState, run_output_actor,
+        spawn_output_actor_with_writer,
+    };
 
     async fn render(commands: Vec<OutputCommand>) -> Result<Vec<Value>> {
         let (writer, mut reader) = duplex(4096);
@@ -421,6 +457,46 @@ mod tests {
                 .is_empty()
         );
         assert!(state.active_ids.contains("sub-1"));
+    }
+
+    #[tokio::test]
+    async fn responses_overtake_queued_events() -> Result<()> {
+        let (priority_sender, priority_receiver) = mpsc::channel(4);
+        let (event_sender, event_receiver) = mpsc::channel(4);
+        event_sender
+            .send(OutputCommand::Event {
+                stream: "things.changed".into(),
+                event: json!({ "sequence": 1 }),
+            })
+            .await?;
+        priority_sender
+            .send(OutputCommand::Response {
+                id: "status".into(),
+                result: Ok(json!({ "ok": true })),
+                cancelled_request_id: None,
+            })
+            .await?;
+        drop(priority_sender);
+        drop(event_sender);
+
+        let (writer, mut reader) = duplex(4096);
+        run_output_actor(
+            priority_receiver,
+            event_receiver,
+            writer,
+            OutputState::new(BasicCorrelation, 4),
+        )
+        .await?;
+        let mut text = String::new();
+        reader.read_to_string(&mut text).await?;
+        let lines = text
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+
+        assert_eq!(lines[0]["kind"], "response");
+        assert_eq!(lines[1]["kind"], "event");
+        Ok(())
     }
 
     #[tokio::test]
