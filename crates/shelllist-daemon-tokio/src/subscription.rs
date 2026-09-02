@@ -60,18 +60,16 @@ impl OwnedTaskRegistry {
     }
 
     pub async fn cancel_owner(&self, owner: &str) -> usize {
-        let mut tasks = self.tasks.lock().await;
-        let ids = tasks
-            .iter()
-            .filter(|(_, task)| task.owner.as_deref() == Some(owner))
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in &ids {
-            if let Some(task) = tasks.remove(id) {
+        let mut cancelled = 0;
+        self.tasks.lock().await.retain(|_, task| {
+            let keep = task.owner.as_deref() != Some(owner);
+            if !keep {
                 task.task.abort();
+                cancelled += 1;
             }
-        }
-        ids.len()
+            keep
+        });
+        cancelled
     }
 
     pub async fn cancel_all(&self) {
@@ -93,15 +91,20 @@ mod tests {
     #[tokio::test]
     async fn cancellation_is_owner_scoped() {
         let registry = OwnedTaskRegistry::default();
-        let id = registry.next_id("subscription");
-        registry
-            .insert(
-                id.clone(),
-                Some(":1.7".into()),
-                tokio::spawn(std::future::pending()),
-            )
-            .await;
-        assert!(!registry.cancel_owned(&id, Some(":1.8")).await);
-        assert!(registry.cancel_owned(&id, Some(":1.7")).await);
+        let first = registry.next_id("subscription");
+        let second = registry.next_id("subscription");
+        for (id, owner) in [(&first, ":1.7"), (&second, ":1.8")] {
+            registry
+                .insert(
+                    id.clone(),
+                    Some(owner.into()),
+                    tokio::spawn(std::future::pending()),
+                )
+                .await;
+        }
+
+        assert_eq!(registry.cancel_owner(":1.7").await, 1);
+        assert!(!registry.cancel_owned(&first, Some(":1.7")).await);
+        assert!(registry.cancel_owned(&second, Some(":1.8")).await);
     }
 }
