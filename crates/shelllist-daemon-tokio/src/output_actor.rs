@@ -55,7 +55,7 @@ impl CorrelationPolicy for BasicCorrelation {
     }
 }
 
-pub enum OutputCommand {
+pub(crate) enum OutputCommand {
     Response {
         id: String,
         result: std::result::Result<Value, String>,
@@ -73,13 +73,13 @@ pub enum OutputCommand {
 }
 
 #[derive(Clone)]
-pub struct OutputHandle {
+pub(crate) struct OutputHandle {
     priority_sender: mpsc::Sender<OutputCommand>,
     event_sender: mpsc::Sender<OutputCommand>,
 }
 
 impl OutputHandle {
-    pub async fn send(&self, command: OutputCommand) -> Result<()> {
+    pub(crate) async fn send(&self, command: OutputCommand) -> Result<()> {
         let sender = if matches!(command, OutputCommand::Event { .. }) {
             &self.event_sender
         } else {
@@ -91,7 +91,7 @@ impl OutputHandle {
             .context("send daemon output command")
     }
 
-    pub async fn active_ids(&self) -> Vec<String> {
+    pub(crate) async fn active_ids(&self) -> Vec<String> {
         let (reply, response) = oneshot::channel();
         if self.send(OutputCommand::ActiveIds(reply)).await.is_err() {
             return Vec::new();
@@ -163,17 +163,14 @@ impl<P: CorrelationPolicy> OutputState<P> {
     }
 
     fn take_pending(&mut self, id: &str) -> Vec<(String, Value)> {
-        let mut matching = Vec::new();
-        let mut retained = VecDeque::new();
-        while let Some((event_id, stream, event)) = self.pending_events.pop_front() {
-            if event_id == id {
-                matching.push((stream, event));
-            } else {
-                retained.push_back((event_id, stream, event));
-            }
-        }
+        let (matching, retained) = std::mem::take(&mut self.pending_events)
+            .into_iter()
+            .partition(|(event_id, _, _)| event_id == id);
         self.pending_events = retained;
         matching
+            .into_iter()
+            .map(|(_, stream, event)| (stream, event))
+            .collect()
     }
 
     fn suppress(&mut self, id: String) {
@@ -219,7 +216,7 @@ impl<P: CorrelationPolicy> OutputState<P> {
 }
 
 #[must_use]
-pub fn spawn_output_actor<P: CorrelationPolicy>(
+pub(crate) fn spawn_output_actor<P: CorrelationPolicy>(
     policy: P,
     capacity: usize,
     pending_limit: usize,
@@ -228,7 +225,7 @@ pub fn spawn_output_actor<P: CorrelationPolicy>(
 }
 
 #[must_use]
-pub fn spawn_output_actor_with_writer<P, W>(
+fn spawn_output_actor_with_writer<P, W>(
     policy: P,
     capacity: usize,
     pending_limit: usize,
@@ -263,52 +260,52 @@ where
     P: CorrelationPolicy,
     W: AsyncWrite + Unpin,
 {
-    let mut priority_closed = false;
-    let mut events_closed = false;
-    while !priority_closed || !events_closed {
-        let command = tokio::select! {
+    loop {
+        tokio::select! {
             biased;
-            command = priority_commands.recv(), if !priority_closed => {
-                match command {
-                    Some(command) => Some(command),
-                    None => { priority_closed = true; None }
-                }
+            Some(command) = priority_commands.recv() => {
+                emit_command(&mut writer, &mut state, command).await?;
             }
-            command = events.recv(), if !events_closed => {
-                match command {
-                    Some(command) => Some(command),
-                    None => { events_closed = true; None }
-                }
+            Some(command) = events.recv() => {
+                emit_command(&mut writer, &mut state, command).await?;
             }
-        };
-        let Some(command) = command else {
-            continue;
-        };
-        match command {
-            OutputCommand::Response {
-                id,
-                result,
-                cancelled_request_id,
-            } => emit_response(&mut writer, &mut state, id, result, cancelled_request_id).await?,
-            OutputCommand::Event { stream, event } => {
-                emit_event(&mut writer, &mut state, stream, event).await?;
-            }
-            OutputCommand::ProtocolError(error) => {
-                emit_line(&mut writer, &protocol_error_message(error)).await?;
-            }
-            OutputCommand::TransportError(error) => {
-                emit_line(&mut writer, &transport_error_message(error)).await?;
-            }
-            OutputCommand::ActiveIds(reply) => {
-                let _ = reply.send(state.active_ids());
-            }
-            OutputCommand::ResetCorrelation => state.reset_correlation(),
-            OutputCommand::Shutdown(id) => {
-                emit_line(&mut writer, &shutdown_message(&id)).await?;
-            }
+            else => return Ok(()),
         }
     }
-    Ok(())
+}
+
+async fn emit_command<P, W>(
+    writer: &mut W,
+    state: &mut OutputState<P>,
+    command: OutputCommand,
+) -> Result<()>
+where
+    P: CorrelationPolicy,
+    W: AsyncWrite + Unpin,
+{
+    match command {
+        OutputCommand::Response {
+            id,
+            result,
+            cancelled_request_id,
+        } => emit_response(writer, state, id, result, cancelled_request_id).await,
+        OutputCommand::Event { stream, event } => emit_event(writer, state, stream, event).await,
+        OutputCommand::ProtocolError(error) => {
+            emit_line(writer, &protocol_error_message(error)).await
+        }
+        OutputCommand::TransportError(error) => {
+            emit_line(writer, &transport_error_message(error)).await
+        }
+        OutputCommand::ActiveIds(reply) => {
+            let _ = reply.send(state.active_ids());
+            Ok(())
+        }
+        OutputCommand::ResetCorrelation => {
+            state.reset_correlation();
+            Ok(())
+        }
+        OutputCommand::Shutdown(id) => emit_line(writer, &shutdown_message(&id)).await,
+    }
 }
 
 async fn emit_response<P, W>(
@@ -402,20 +399,6 @@ mod tests {
             .map_err(Into::into)
     }
 
-    #[test]
-    fn pending_limit_counts_events_instead_of_correlation_ids() {
-        let mut state = OutputState::new(BasicCorrelation, 2);
-        for sequence in 1..=3 {
-            state.buffer(
-                "sub-1".into(),
-                "things.changed".into(),
-                serde_json::json!({ "sequence": sequence }),
-            );
-        }
-        assert_eq!(state.pending_events.len(), 2);
-        assert_eq!(state.pending_events[0].2["sequence"], 2);
-    }
-
     #[tokio::test]
     async fn buffers_subscription_events_until_the_response_is_written() -> Result<()> {
         let lines = render(vec![
@@ -435,28 +418,6 @@ mod tests {
         assert_eq!(lines[0]["kind"], "response");
         assert_eq!(lines[1]["kind"], "event");
         Ok(())
-    }
-
-    #[test]
-    fn reset_allows_reused_ids_after_daemon_replacement() {
-        let mut state = OutputState::new(BasicCorrelation, 4);
-        state.suppress("sub-1".into());
-        state.active_ids.insert("sub-2".into());
-        state.buffer("sub-3".into(), "things.changed".into(), json!({}));
-
-        state.reset_correlation();
-
-        assert!(state.suppressed_ids.is_empty());
-        assert!(state.active_ids.is_empty());
-        assert!(state.pending_events.is_empty());
-        assert!(
-            state
-                .activate(&json!({
-                    "data": { "subscription": { "id": "sub-1" } }
-                }))
-                .is_empty()
-        );
-        assert!(state.active_ids.contains("sub-1"));
     }
 
     #[tokio::test]

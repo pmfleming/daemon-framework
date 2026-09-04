@@ -17,15 +17,22 @@ pub fn validate_unique_names(values: &[&str]) -> Result<(), String> {
 }
 
 pub fn fixture_names<'a>(fixture: &'a Value, section: &str) -> Result<Vec<&'a str>, String> {
-    fixture
-        .pointer(&format!("/registry/{section}"))
+    let registry = fixture
+        .get("registry")
+        .ok_or_else(|| "fixture registry is missing".to_owned())?;
+    registry_names(registry, section)
+}
+
+pub fn registry_names<'a>(registry: &'a Value, section: &str) -> Result<Vec<&'a str>, String> {
+    registry
+        .get(section)
         .and_then(Value::as_array)
-        .ok_or_else(|| format!("fixture registry section is missing: {section}"))?
+        .ok_or_else(|| format!("protocol registry section is missing: {section}"))?
         .iter()
         .map(|item| {
             item.get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("fixture registry name is invalid: {section}"))
+                .ok_or_else(|| format!("protocol registry name is invalid: {section}"))
         })
         .collect()
 }

@@ -1,6 +1,7 @@
 use std::io::{self, Read};
 
 use serde_json::Value;
+use shelllist_daemon_core::registry_names;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -25,8 +26,8 @@ fn render(value: &Value) -> Result<String> {
         .get("registry")
         .or_else(|| value.pointer("/data/protocol"))
         .ok_or_else(|| io::Error::other("protocol registry is missing registry data"))?;
-    let methods = names(registry, "methods")?;
-    let streams = names(registry, "streams")?;
+    let methods = registry_names(registry, "methods").map_err(io::Error::other)?;
+    let streams = registry_names(registry, "streams").map_err(io::Error::other)?;
 
     let mut output = String::from(
         ".pragma library\n\n// Generated from the daemon-owned protocol registry. Do not edit.\n",
@@ -41,25 +42,7 @@ fn render(value: &Value) -> Result<String> {
     Ok(output)
 }
 
-fn names(registry: &Value, field: &str) -> Result<Vec<String>> {
-    registry
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| io::Error::other(format!("protocol registry is missing {field}")))?
-        .iter()
-        .map(|entry| {
-            entry
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    io::Error::other(format!("protocol {field} entry is missing name")).into()
-                })
-        })
-        .collect()
-}
-
-fn render_names(variable: &str, names: &[String]) -> Result<String> {
+fn render_names(variable: &str, names: &[&str]) -> Result<String> {
     let mut output = format!("var {variable} = ({{\n");
     for name in names {
         let encoded = serde_json::to_string(name)?;
@@ -76,7 +59,7 @@ mod tests {
     use super::render;
 
     #[test]
-    fn renders_direct_and_enveloped_registries() {
+    fn renders_direct_and_enveloped_registries() -> super::Result<()> {
         let direct = json!({
             "protocol": "test-api",
             "version": 2,
@@ -85,15 +68,16 @@ mod tests {
                 "streams": [{ "name": "thing.changed" }]
             }
         });
-        let output = render(&direct).unwrap();
+        let output = render(&direct)?;
         assert!(output.contains("var protocol = \"test-api\";"));
         assert!(output.contains("\"thing.read\": \"thing.read\""));
 
         let enveloped = json!({
             "protocol": "test-api",
             "version": 2,
-            "data": { "protocol": direct["registry"].clone() }
+            "data": { "protocol": &direct["registry"] }
         });
-        assert_eq!(render(&enveloped).unwrap(), output);
+        assert_eq!(render(&enveloped)?, output);
+        Ok(())
     }
 }

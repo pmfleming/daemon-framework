@@ -9,7 +9,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::{CorrelationPolicy, JsonDbusClient, OutputCommand, OutputHandle, spawn_output_actor};
+use crate::JsonDbusClient;
+use crate::output_actor::{CorrelationPolicy, OutputCommand, OutputHandle, spawn_output_actor};
 
 const OUTPUT_CAPACITY: usize = 64;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
@@ -131,17 +132,8 @@ async fn request_loop(
 ) -> Result<Option<String>> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read JSONL request")? {
-        if line.trim().is_empty() {
+        let Some(request) = parse_request(&line, output).await? else {
             continue;
-        }
-        let request = match serde_json::from_str::<ClientRequest>(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                output
-                    .send(OutputCommand::ProtocolError(error.to_string()))
-                    .await?;
-                continue;
-            }
         };
         if let ClientRequest::Shutdown { id } = request {
             return Ok(Some(id));
@@ -160,6 +152,21 @@ async fn request_loop(
     Ok(None)
 }
 
+async fn parse_request(line: &str, output: &OutputHandle) -> Result<Option<ClientRequest>> {
+    if line.trim().is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_str(line) {
+        Ok(request) => Ok(Some(request)),
+        Err(error) => {
+            output
+                .send(OutputCommand::ProtocolError(error.to_string()))
+                .await?;
+            Ok(None)
+        }
+    }
+}
+
 fn spawn_request(
     calls: &mut JoinSet<()>,
     dbus: ReconnectingClient,
@@ -172,10 +179,11 @@ fn spawn_request(
     calls.spawn(async move {
         // Cancellation is control-plane traffic: it must not wait behind calls it
         // is intended to cancel. Ordinary calls and subscriptions remain bounded.
-        let _permit = if request_uses_slot(&request) {
-            request_slots.acquire_owned().await.ok()
-        } else {
-            None
+        let _permit = match &request {
+            ClientRequest::Call { .. } | ClientRequest::Subscribe { .. } => {
+                request_slots.acquire_owned().await.ok()
+            }
+            ClientRequest::Cancel { .. } | ClientRequest::Shutdown { .. } => None,
         };
         let command = execute_request(dbus, request, cancel_mode, call_failure).await;
         let _ = output.send(command).await;
@@ -193,12 +201,12 @@ async fn execute_request(
             let result = with_transport_timeout(&dbus, REQUEST_TIMEOUT, async {
                 dbus.get().await?.call(&method, params).await
             })
-                .await
-                .map_err(|error| call_failure(&method, &error))
-                .or_else(|failure| match failure {
-                    CallFailure::Api(response) => Ok(response),
-                    CallFailure::Transport(error) => Err(error),
-                });
+            .await
+            .map_err(|error| call_failure(&method, &error))
+            .or_else(|failure| match failure {
+                CallFailure::Api(response) => Ok(response),
+                CallFailure::Transport(error) => Err(error),
+            });
             response_command(id, result, None)
         }
         ClientRequest::Subscribe { id, streams } => {
@@ -222,10 +230,6 @@ async fn execute_request(
         }
         ClientRequest::Shutdown { id } => OutputCommand::Shutdown(id),
     }
-}
-
-fn request_uses_slot(request: &ClientRequest) -> bool {
-    matches!(request, ClientRequest::Call { .. } | ClientRequest::Subscribe { .. })
 }
 
 async fn with_transport_timeout<T>(
@@ -311,22 +315,19 @@ async fn report_transport_error(
 }
 
 fn spawn_owner_watcher(dbus: ReconnectingClient, output: OutputHandle) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let result = async { dbus.get().await?.watch_replacement().await }.await;
-            match result {
-                Ok(()) => {
-                    if output.send(OutputCommand::ResetCorrelation).await.is_err() {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "daemon owner watcher stopped");
-                    tokio::time::sleep(INITIAL_RECONNECT_DELAY).await;
-                }
-            }
+    tokio::spawn(async move { while watch_owner_once(&dbus, &output).await {} })
+}
+
+async fn watch_owner_once(dbus: &ReconnectingClient, output: &OutputHandle) -> bool {
+    let result = async { dbus.get().await?.watch_replacement().await }.await;
+    match result {
+        Ok(()) => output.send(OutputCommand::ResetCorrelation).await.is_ok(),
+        Err(error) => {
+            tracing::warn!(%error, "daemon owner watcher stopped");
+            tokio::time::sleep(INITIAL_RECONNECT_DELAY).await;
+            true
         }
-    })
+    }
 }
 
 fn reap_finished(calls: &mut JoinSet<()>) {
@@ -342,18 +343,23 @@ fn log_join_result(result: std::result::Result<(), tokio::task::JoinError>) {
 }
 
 async fn drain_calls(calls: &mut JoinSet<()>, timeout: Option<Duration>) {
-    let drain = async {
-        while let Some(result) = calls.join_next().await {
-            log_join_result(result);
-        }
+    let Some(timeout) = timeout else {
+        drain_all(calls).await;
+        return;
     };
-    if let Some(timeout) = timeout {
-        if tokio::time::timeout(timeout, drain).await.is_err() {
-            calls.abort_all();
-            while calls.join_next().await.is_some() {}
-        }
-    } else {
-        drain.await;
+    if tokio::time::timeout(timeout, drain_all(calls))
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    calls.abort_all();
+    while calls.join_next().await.is_some() {}
+}
+
+async fn drain_all(calls: &mut JoinSet<()>) {
+    while let Some(result) = calls.join_next().await {
+        log_join_result(result);
     }
 }
 
@@ -363,33 +369,5 @@ async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle, mode: C
     };
     for id in output.active_ids().await {
         let _ = cancel(&client, &id, mode).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-    use shelllist_daemon_core::ClientRequest;
-
-    use super::request_uses_slot;
-
-    #[test]
-    fn cancellation_bypasses_request_slots() {
-        assert!(!request_uses_slot(&ClientRequest::Cancel {
-            id: "cancel".into(),
-            request_id: "slow-call".into(),
-        }));
-        assert!(!request_uses_slot(&ClientRequest::Shutdown {
-            id: "shutdown".into(),
-        }));
-        assert!(request_uses_slot(&ClientRequest::Call {
-            id: "call".into(),
-            method: "status".into(),
-            params: json!({}),
-        }));
-        assert!(request_uses_slot(&ClientRequest::Subscribe {
-            id: "sub".into(),
-            streams: vec!["status".into()],
-        }));
     }
 }

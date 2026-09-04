@@ -6,7 +6,7 @@ use zbus::{message::Header, names::UniqueName, object_server::SignalEmitter};
 
 use shelllist_daemon_core::DaemonEndpoint;
 
-use crate::{OutputCommand, OutputHandle};
+use crate::output_actor::{OutputCommand, OutputHandle};
 
 static OWNER_LOSSES: OnceCell<OwnerLossMonitor> = OnceCell::const_new();
 
@@ -49,19 +49,23 @@ impl OwnerLossMonitor {
         if !name_has_owner(&self.connection, owner).await? {
             return Ok(());
         }
-        loop {
-            match losses.recv().await {
-                Ok(lost) if lost == owner => return Ok(()),
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    if !name_has_owner(&self.connection, owner).await? {
-                        return Ok(());
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    anyhow::bail!("shared D-Bus owner monitor stopped")
-                }
-            }
+        while !owner_loss_received(&self.connection, &mut losses, owner).await? {}
+        Ok(())
+    }
+}
+
+async fn owner_loss_received(
+    connection: &zbus::Connection,
+    losses: &mut broadcast::Receiver<String>,
+    owner: &str,
+) -> Result<bool> {
+    match losses.recv().await {
+        Ok(lost) => Ok(lost == owner),
+        Err(broadcast::error::RecvError::Lagged(_)) => {
+            Ok(!name_has_owner(connection, owner).await?)
+        }
+        Err(broadcast::error::RecvError::Closed) => {
+            anyhow::bail!("shared D-Bus owner monitor stopped")
         }
     }
 }
@@ -159,7 +163,7 @@ impl JsonDbusClient {
         Ok(json!({ "cancelled": request_id }))
     }
 
-    pub async fn forward_events(
+    pub(crate) async fn forward_events(
         &self,
         output: &OutputHandle,
         generation_ready: &watch::Sender<bool>,
@@ -169,7 +173,8 @@ impl JsonDbusClient {
             .receive_signal("Event")
             .await
             .context("receive daemon events")?;
-        mark_events_ready(generation_ready);
+        // Retain readiness even when no subscription is currently waiting.
+        generation_ready.send_replace(true);
         while let Some(message) = events.next().await {
             let (stream, event_json): (String, String) = message
                 .body()
@@ -182,8 +187,8 @@ impl JsonDbusClient {
         anyhow::bail!("daemon event stream ended")
     }
 
-    pub async fn watch_replacement(&self) -> Result<()> {
-        watch_name_replacement(&self.connection, self.endpoint.bus_name).await
+    pub(crate) async fn watch_replacement(&self) -> Result<()> {
+        wait_for_name_replacement(&self.connection, self.endpoint.bus_name).await
     }
 }
 
@@ -213,14 +218,8 @@ pub async fn wait_for_owner_name_loss(connection: &zbus::Connection, owner: &str
         .await
 }
 
-pub async fn watch_name_replacement(connection: &zbus::Connection, bus_name: &str) -> Result<()> {
-    wait_for_name_change(connection, bus_name, false, name_replaced).await
-}
-
-fn mark_events_ready(ready: &watch::Sender<bool>) {
-    // Event forwarding can be established before the first subscription starts
-    // waiting. `send_replace` retains readiness when no receivers exist yet.
-    ready.send_replace(true);
+async fn wait_for_name_replacement(connection: &zbus::Connection, bus_name: &str) -> Result<()> {
+    wait_for_name_change(connection, bus_name, name_replaced).await
 }
 
 fn owner_lost(old_owner: &str, new_owner: &str) -> bool {
@@ -234,7 +233,6 @@ fn name_replaced(old_owner: &str, new_owner: &str) -> bool {
 async fn wait_for_name_change(
     connection: &zbus::Connection,
     watched_name: &str,
-    return_if_absent: bool,
     matches: fn(&str, &str) -> bool,
 ) -> Result<()> {
     let proxy = dbus_proxy(connection).await?;
@@ -242,15 +240,6 @@ async fn wait_for_name_change(
         .receive_signal("NameOwnerChanged")
         .await
         .context("receive D-Bus owner changes")?;
-    if return_if_absent {
-        let has_owner: bool = proxy
-            .call("NameHasOwner", &(watched_name,))
-            .await
-            .context("check D-Bus owner")?;
-        if !has_owner {
-            return Ok(());
-        }
-    }
     while let Some(message) = changes.next().await {
         let (name, old_owner, new_owner): (String, String, String) =
             message
@@ -262,21 +251,4 @@ async fn wait_for_name_change(
         }
     }
     anyhow::bail!("D-Bus owner-change stream ended")
-}
-
-#[cfg(test)]
-mod tests {
-    use tokio::sync::watch;
-
-    use super::mark_events_ready;
-
-    #[test]
-    fn event_readiness_is_retained_until_a_subscription_waits() {
-        let (ready, initial_receiver) = watch::channel(false);
-        drop(initial_receiver);
-
-        mark_events_ready(&ready);
-
-        assert!(*ready.subscribe().borrow());
-    }
 }

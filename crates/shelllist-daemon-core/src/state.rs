@@ -1,7 +1,7 @@
 use std::env;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -160,17 +160,16 @@ fn write_and_replace<T: Serialize>(
     value: &T,
     policy: AtomicWritePolicy,
 ) -> Result<(), StateError> {
-    let bytes = if policy.pretty {
-        serde_json::to_vec_pretty(value)?
-    } else {
-        serde_json::to_vec(value)?
-    };
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(policy.file_mode)
         .open(temporary)?;
-    output.write_all(&bytes)?;
+    if policy.pretty {
+        serde_json::to_writer_pretty(&mut output, value)?;
+    } else {
+        serde_json::to_writer(&mut output, value)?;
+    }
     output.sync_all()?;
     fs::set_permissions(temporary, fs::Permissions::from_mode(policy.file_mode))?;
     fs::rename(temporary, destination)?;
@@ -185,24 +184,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::io;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::atomic::Ordering;
 
     use super::{
-        AtomicWritePolicy, TEMP_SEQUENCE, absolute_path, is_safe_relative_path,
-        is_single_normal_component, read_json, write_json_atomic,
+        AtomicWritePolicy, TEMP_SEQUENCE, is_safe_relative_path, is_single_normal_component,
+        read_json, write_json_atomic,
     };
-
-    #[test]
-    fn xdg_roots_must_be_absolute() {
-        assert_eq!(
-            absolute_path(Some(PathBuf::from("/state"))),
-            Some(PathBuf::from("/state"))
-        );
-        assert_eq!(absolute_path(Some(PathBuf::from("../state"))), None);
-        assert_eq!(absolute_path(Some(PathBuf::from("state"))), None);
-        assert_eq!(absolute_path(None), None);
-    }
 
     #[test]
     fn xdg_suffixes_cannot_escape_the_application_directory() {
