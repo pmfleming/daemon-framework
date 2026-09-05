@@ -321,7 +321,19 @@ fn spawn_owner_watcher(dbus: ReconnectingClient, output: OutputHandle) -> JoinHa
 async fn watch_owner_once(dbus: &ReconnectingClient, output: &OutputHandle) -> bool {
     let result = async { dbus.get().await?.watch_replacement().await }.await;
     match result {
-        Ok(()) => output.send(OutputCommand::ResetCorrelation).await.is_ok(),
+        Ok(()) => {
+            dbus.invalidate().await;
+            if output.send(OutputCommand::ResetCorrelation).await.is_err() {
+                return false;
+            }
+            output
+                .send(OutputCommand::TransportError(format!(
+                    "{} D-Bus owner changed",
+                    dbus.endpoint.executable
+                )))
+                .await
+                .is_ok()
+        }
         Err(error) => {
             tracing::warn!(%error, "daemon owner watcher stopped");
             tokio::time::sleep(INITIAL_RECONNECT_DELAY).await;
