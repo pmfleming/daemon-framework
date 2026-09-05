@@ -225,7 +225,7 @@ pub(crate) fn spawn_output_actor<P: CorrelationPolicy>(
 }
 
 #[must_use]
-fn spawn_output_actor_with_writer<P, W>(
+pub(crate) fn spawn_output_actor_with_writer<P, W>(
     policy: P,
     capacity: usize,
     pending_limit: usize,

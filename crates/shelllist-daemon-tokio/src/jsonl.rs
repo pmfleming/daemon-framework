@@ -185,20 +185,21 @@ fn spawn_request(
             }
             ClientRequest::Cancel { .. } | ClientRequest::Shutdown { .. } => None,
         };
-        let command = execute_request(dbus, request, cancel_mode, call_failure).await;
+        let command = execute_request(dbus, &output, request, cancel_mode, call_failure).await;
         let _ = output.send(command).await;
     });
 }
 
 async fn execute_request(
     dbus: ReconnectingClient,
+    output: &OutputHandle,
     request: ClientRequest,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
 ) -> OutputCommand {
     match request {
         ClientRequest::Call { id, method, params } => {
-            let result = with_transport_timeout(&dbus, REQUEST_TIMEOUT, async {
+            let result = with_transport_timeout(output, REQUEST_TIMEOUT, async {
                 dbus.get().await?.call(&method, params).await
             })
             .await
@@ -210,7 +211,7 @@ async fn execute_request(
             response_command(id, result, None)
         }
         ClientRequest::Subscribe { id, streams } => {
-            let result = with_transport_timeout(&dbus, REQUEST_TIMEOUT, async {
+            let result = with_transport_timeout(output, REQUEST_TIMEOUT, async {
                 dbus.wait_for_event_forwarding().await?;
                 dbus.get().await?.subscribe(streams).await
             })
@@ -219,7 +220,7 @@ async fn execute_request(
             response_command(id, result, None)
         }
         ClientRequest::Cancel { id, request_id } => {
-            let result = with_transport_timeout(&dbus, CONTROL_TIMEOUT, async {
+            let result = with_transport_timeout(output, CONTROL_TIMEOUT, async {
                 let client = dbus.get().await?;
                 cancel(&client, &request_id, cancel_mode).await
             })
@@ -233,15 +234,22 @@ async fn execute_request(
 }
 
 async fn with_transport_timeout<T>(
-    dbus: &ReconnectingClient,
+    output: &OutputHandle,
     timeout: Duration,
     future: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     match tokio::time::timeout(timeout, future).await {
         Ok(result) => result,
         Err(_) => {
-            dbus.invalidate().await;
-            anyhow::bail!("daemon request timed out after {}ms", timeout.as_millis())
+            let message = format!("daemon request timed out after {}ms", timeout.as_millis());
+            // The frontend restarts the bridge on transport-error. Keep this
+            // generation intact until then: replacing just the cached client
+            // strands the event reader on its old connection and leaves new
+            // subscriptions waiting for readiness that can never arrive.
+            output
+                .send(OutputCommand::TransportError(message.clone()))
+                .await?;
+            anyhow::bail!(message)
         }
     }
 }
@@ -381,5 +389,73 @@ async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle, mode: C
     };
     for id in output.active_ids().await {
         let _ = cancel(&client, &id, mode).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::pending, time::Duration};
+
+    use anyhow::Result;
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, BufReader, duplex};
+
+    use super::{response_command, with_transport_timeout};
+    use crate::output_actor::{BasicCorrelation, OutputCommand, spawn_output_actor_with_writer};
+
+    #[tokio::test]
+    async fn timeout_reports_recovery_before_the_correlated_response() -> Result<()> {
+        let (writer, reader) = duplex(4096);
+        let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 8, writer);
+        let mut lines = BufReader::new(reader).lines();
+
+        // The domain mapper may turn the error into a regular API response. The
+        // frontend must still receive an independent transport recovery signal.
+        let error =
+            with_transport_timeout(&output, Duration::from_millis(1), pending::<Result<()>>())
+                .await
+                .expect_err("request must time out");
+        output
+            .send(response_command(
+                "slow-call".into(),
+                Ok(json!({ "ok": false, "error": { "code": "daemon-unavailable" } })),
+                None,
+            ))
+            .await?;
+        drop(output);
+        task.await??;
+
+        let recovery: Value = serde_json::from_str(&lines.next_line().await?.unwrap())?;
+        assert_eq!(recovery["kind"], "transport-error");
+        assert_eq!(recovery["error"], error.to_string());
+        let response: Value = serde_json::from_str(&lines.next_line().await?.unwrap())?;
+        assert_eq!(response["id"], "slow-call");
+        assert_eq!(response["kind"], "response");
+        assert!(lines.next_line().await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_requests_do_not_trigger_transport_recovery() -> Result<()> {
+        let (writer, reader) = duplex(4096);
+        let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 8, writer);
+        let mut lines = BufReader::new(reader).lines();
+        assert_eq!(
+            with_transport_timeout(&output, Duration::from_secs(1), async { Ok(42) }).await?,
+            42
+        );
+        let error = with_transport_timeout::<()>(&output, Duration::from_secs(1), async {
+            anyhow::bail!("ordinary request failure")
+        })
+        .await
+        .expect_err("request returns its error");
+        assert_eq!(error.to_string(), "ordinary request failure");
+        output.send(OutputCommand::Shutdown("done".into())).await?;
+        drop(output);
+        task.await??;
+        let shutdown: Value = serde_json::from_str(&lines.next_line().await?.unwrap())?;
+        assert_eq!(shutdown["id"], "done");
+        assert!(lines.next_line().await?.is_none());
+        Ok(())
     }
 }
