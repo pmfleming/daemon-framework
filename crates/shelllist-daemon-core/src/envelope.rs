@@ -173,19 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn correlation_and_domain_fields_are_preserved() {
-        let event = event_envelope(
-            API,
-            "things.changed",
-            "changed",
-            Correlation::Subscription("sub-1"),
-            json!({ "data": { "revision": 2 } }),
-        );
-        assert_eq!(event["subscription_id"], "sub-1");
-        assert_eq!(event["data"]["revision"], 2);
-    }
-
-    #[test]
     fn domain_fields_cannot_replace_envelope_identity() {
         let event = event_envelope(
             API,

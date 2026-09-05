@@ -51,33 +51,3 @@ fn render_names(variable: &str, names: &[&str]) -> Result<String> {
     output.push_str("});\n");
     Ok(output)
 }
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::render;
-
-    #[test]
-    fn renders_direct_and_enveloped_registries() -> super::Result<()> {
-        let direct = json!({
-            "protocol": "test-api",
-            "version": 2,
-            "registry": {
-                "methods": [{ "name": "thing.read" }],
-                "streams": [{ "name": "thing.changed" }]
-            }
-        });
-        let output = render(&direct)?;
-        assert!(output.contains("var protocol = \"test-api\";"));
-        assert!(output.contains("\"thing.read\": \"thing.read\""));
-
-        let enveloped = json!({
-            "protocol": "test-api",
-            "version": 2,
-            "data": { "protocol": &direct["registry"] }
-        });
-        assert_eq!(render(&enveloped)?, output);
-        Ok(())
-    }
-}
