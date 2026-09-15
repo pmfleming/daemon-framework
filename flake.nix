@@ -45,6 +45,7 @@
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "--workspace" ];
             cargoTestFlags = [ "--workspace" ];
+            nativeCheckInputs = [ pkgs.dbus ];
             installPhase = "touch $out";
           };
         });
@@ -67,6 +68,7 @@
             packages = with pkgs; [
               cargo
               cargo-audit
+              dbus
               clippy
               nixpkgs-fmt
               rust-analyzer
