@@ -15,7 +15,14 @@ struct Bus {
 impl Bus {
     fn start() -> Self {
         let mut child = Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address=1"])
+            // The mandatory Nix compatibility gate has no host /etc/session.conf.
+            // Use a private test policy with no host service-activation paths.
+            .args([
+                "--config-file",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/session.conf"),
+                "--nofork",
+                "--print-address=1",
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()

@@ -19,3 +19,22 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # Framework-only changes must exercise every current consumer immediately.
+  # No per-daemon framework pins: this checkout overrides them all.
+  consumers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: daemon-framework
+      - uses: cachix/install-nix-action@v31
+      - name: Check out current consumers
+        run: |
+          for repo in shelllist shelllist-hyprland app-daemon bar-daemon bt-daemon clip-daemon nm-daemon; do
+            git clone --depth 1 --branch main "https://github.com/pmfleming/$repo.git" "$repo"
+          done
+      - name: Test shared source policy
+        run: PYTHONDONTWRITEBYTECODE=1 python3 daemon-framework/tools/test-local-build.py
+      - name: Test complete current-sibling matrix
+        run: python3 daemon-framework/tools/local-build.py check shelllist --keep-going --print-build-logs

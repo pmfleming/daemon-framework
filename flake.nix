@@ -30,6 +30,13 @@
         in
         {
           inherit protocolBindings;
+          localBuild = pkgs.writeShellApplication {
+            name = "local-build";
+            runtimeInputs = [ pkgs.python3 pkgs.git pkgs.nix ];
+            text = ''
+              exec python3 ${./tools/local-build.py} "$@"
+            '';
+          };
           default = protocolBindings;
         });
 
@@ -37,6 +44,13 @@
         let
           pkgs = import nixpkgs { inherit system; };
         in {
+          localBuild = pkgs.runCommand "local-build-policy-tests"
+            { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
+            export HOME=$TMPDIR
+            export PYTHONDONTWRITEBYTECODE=1
+            python3 ${self}/tools/test-local-build.py
+            touch $out
+          '';
           protocolBindings = self.packages.${system}.protocolBindings;
           workspace = pkgs.rustPlatform.buildRustPackage {
             pname = "daemon-framework-workspace-check";

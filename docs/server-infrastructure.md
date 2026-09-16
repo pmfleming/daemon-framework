@@ -135,15 +135,16 @@ and admission, cancellation/completion races, file failure cleanup, bounded read
 blocking-lane overload/shutdown, resume deduplication and forwarding lag/closure.
 Transport tests require `dbus-daemon` (included in the development/check environment).
 
-App vendors this source; refresh its `vendor/daemon-framework` snapshot together
-with the shared framework. The other daemon Cargo manifests use the sibling
-checkout, but their Nix builds pin the framework Git input. After committing the
-framework changes to the input's `main` branch, update those pins before deployment:
+All five consumers, including app-daemon, use this current sibling checkout.
+Never vendor or revision-pin the framework. Cargo consumes live sibling sources;
+Nix builds use a single fresh snapshot of tracked worktrees, including dirty files:
 
 ```sh
-for daemon in bar-daemon bt-daemon clip-daemon nm-daemon; do
-    (cd "../$daemon" && nix flake update daemonFramework)
-done
+python3 tools/local-build.py check ../shelllist --keep-going
+# On the desktop, check and deploy that same current-source policy:
+rebuild
 ```
 
-Do not deploy only the daemon changes against the previous framework input.
+No local deployment lock update or framework commit is required. Checks and
+deployment within one rebuild use the same captured sources; subsequent edits
+are picked up by the next invocation. Third-party dependency locks are separate.

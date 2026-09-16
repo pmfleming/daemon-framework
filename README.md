@@ -53,17 +53,27 @@ control lane so ordinary call saturation cannot block cleanup.
 
 Deploy routed frontends with rebuilt daemon client binaries. There is deliberately
 no frontend fallback to a per-request JavaScript object table. All Shelllist
-clients use this shared implementation; remember to refresh app-daemon's vendored
-copy as well as the Nix framework input.
+clients use the same current sibling framework, including app-daemon. Never
+introduce a vendored framework copy or a per-consumer framework revision pin.
 
 ## Development
 
+**Source policy:** all five daemons consume this current Git worktree. Cargo uses
+sibling paths; Nix development uses `tools/local-build.py` (installed as
+`local-build` on the desktop). It snapshots tracked files, including uncommitted
+edits, once per invocation and resolves only a disposable build graph. New files
+must be Git-added; ignored build products are excluded. Persistent locks select
+third-party dependencies only. Plain `nix build`/`flake check` can recreate local
+pins; do not use them as the co-development entry point.
+
 ```bash
-nix develop
+python3 tools/local-build.py check ../shelllist --keep-going
+python3 tools/local-build.py build ../app-daemon
+python3 tools/local-build.py develop .
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-nix flake check
+python3 tools/local-build.py check .
 rqlens measure hotspots
 ```
 
