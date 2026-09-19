@@ -115,7 +115,9 @@ async fn logind_connection(sender: &mpsc::Sender<()>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ResumeDetector, monitor_resumes, suspend_offset};
+    use std::time::Duration;
+    use tokio::sync::watch;
     #[test]
     fn short_sleep_signal_and_clock_fallback_are_deduplicated() {
         let mut detector = ResumeDetector::default();

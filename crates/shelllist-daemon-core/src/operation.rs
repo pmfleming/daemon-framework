@@ -150,7 +150,8 @@ impl<T> RecentResults<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{OperationAdmissionError, OperationLimits, OwnedOperations, RecentResults};
+    use std::time::{Duration, Instant};
     #[test]
     fn admission_and_terminal_claim_are_owner_scoped() {
         let mut active = OwnedOperations::new(OperationLimits {

@@ -64,7 +64,8 @@ pub async fn emit_json_event(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{BroadcastEvent, WatchPhase, forward_broadcast, forward_watch};
+    use tokio::sync::{broadcast, watch};
     #[tokio::test]
     async fn watch_emits_once_releases_borrow_and_stops_when_closed() {
         let (updates, receiver) = watch::channel(0);

@@ -258,8 +258,8 @@ impl Drop for OwnedTaskRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::future::pending;
+    use super::{OwnedTaskRegistry, TaskAdmissionError, TaskLimits};
+    use std::{future::pending, sync::Arc};
 
     #[tokio::test]
     async fn admission_cancellation_and_shutdown_are_owner_scoped() {

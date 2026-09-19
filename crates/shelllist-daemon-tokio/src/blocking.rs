@@ -148,15 +148,14 @@ impl BlockingLane {
             .unwrap_or_else(|p| p.into_inner())
             .take();
         let mut dispatcher_stopped = true;
-        if let Some(mut dispatcher) = dispatcher {
-            if tokio::time::timeout_at(deadline, &mut dispatcher)
+        if let Some(mut dispatcher) = dispatcher
+            && tokio::time::timeout_at(deadline, &mut dispatcher)
                 .await
                 .is_err()
-            {
-                dispatcher_stopped = false;
-                dispatcher.abort();
-                let _ = dispatcher.await;
-            }
+        {
+            dispatcher_stopped = false;
+            dispatcher.abort();
+            let _ = dispatcher.await;
         }
         let _ = tokio::time::timeout_at(deadline, self.wait_until_idle()).await;
         let active_jobs = self.activity.count.load(Ordering::Acquire);
@@ -236,7 +235,9 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{BlockingLane, LaneError};
+    use std::time::Duration;
+    use tokio::sync::oneshot;
     #[tokio::test]
     async fn bounds_admission_contains_panics_and_rejects_after_shutdown() {
         let lane = BlockingLane::start(&tokio::runtime::Handle::current(), "test", 1, 1);

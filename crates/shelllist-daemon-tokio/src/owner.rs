@@ -31,11 +31,7 @@ impl OwnerLossMonitor {
         self.0
             .started
             .get_or_try_init(|| async {
-                let proxy = proxy(&self.0.connection).await?;
-                let mut changes = proxy
-                    .receive_signal("NameOwnerChanged")
-                    .await
-                    .context("receive D-Bus owner changes")?;
+                let mut changes = owner_changes(&self.0.connection).await?;
                 let (losses, _) = broadcast::channel(64);
                 let publisher = losses.clone();
                 let (stopped, state) = watch::channel(false);
@@ -70,15 +66,13 @@ impl OwnerLossMonitor {
             return Ok(());
         }
         loop {
-            match losses.recv().await {
-                Ok(lost) if lost == owner => return Ok(()),
-                Ok(_) => {}
-                Err(OwnerLossError::Lagged(_)) => {
-                    if !self.has_owner(owner).await? {
-                        return Ok(());
-                    }
-                }
+            let lost = match losses.recv().await {
+                Ok(lost) => lost == owner,
+                Err(OwnerLossError::Lagged(_)) => !self.has_owner(owner).await?,
                 Err(error) => return Err(error.into()),
+            };
+            if lost {
+                return Ok(());
             }
         }
     }
@@ -149,9 +143,37 @@ async fn proxy(connection: &zbus::Connection) -> Result<zbus::Proxy<'_>> {
     .context("create D-Bus owner proxy")
 }
 
+async fn owner_changes(
+    connection: &zbus::Connection,
+) -> Result<zbus::proxy::SignalStream<'static>> {
+    proxy(connection)
+        .await?
+        .receive_signal("NameOwnerChanged")
+        .await
+        .context("receive D-Bus owner changes")
+}
+
+pub(crate) async fn wait_for_name_replacement(
+    connection: &zbus::Connection,
+    watched_name: &str,
+) -> Result<()> {
+    let mut changes = owner_changes(connection).await?;
+    while let Some(message) = changes.next().await {
+        let (name, old, new): (String, String, String) = message
+            .body()
+            .deserialize()
+            .context("decode owner change")?;
+        if name == watched_name && !old.is_empty() && old != new {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("D-Bus owner-change stream ended")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{OwnerLossError, OwnerLossReceiver};
+    use tokio::sync::{broadcast, watch};
     #[tokio::test]
     async fn stopped_monitor_wakes_existing_and_late_receivers() {
         let (losses, receiver) = broadcast::channel(1);

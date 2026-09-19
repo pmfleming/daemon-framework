@@ -52,25 +52,7 @@ impl StagedFile {
         if policy.reject_symlink_destination {
             reject_symlink(path)?;
         }
-        let (mut output, temporary) = loop {
-            let mut temporary_name = name.to_os_string();
-            temporary_name.push(format!(
-                ".{}-{}.tmp",
-                std::process::id(),
-                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-            ));
-            let temporary = parent.join(temporary_name);
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            if let Some(mode) = policy.file_mode {
-                options.mode(mode);
-            }
-            match options.open(&temporary) {
-                Ok(file) => break (file, temporary),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        };
+        let (mut output, temporary) = create_temporary(parent, name, policy.file_mode)?;
         let staged = Self {
             destination: path.into(),
             temporary: Some(temporary),
@@ -105,6 +87,32 @@ impl Drop for StagedFile {
     }
 }
 
+fn create_temporary(
+    parent: &Path,
+    name: &std::ffi::OsStr,
+    mode: Option<u32>,
+) -> io::Result<(File, PathBuf)> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+    loop {
+        let mut name = name.to_os_string();
+        name.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temporary = parent.join(name);
+        match options.open(&temporary) {
+            Ok(file) => return Ok((file, temporary)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 pub fn write_bytes_atomic(
     path: &Path,
     contents: &[u8],
@@ -133,12 +141,10 @@ fn create_directory(path: &Path, policy: AtomicFilePolicy) -> io::Result<()> {
         .ancestors()
         .take_while(|path| !path.as_os_str().is_empty() && !path.exists())
         .collect::<Vec<_>>();
-    if policy.directory_mode.is_some() {
-        reject_symlink(path)?;
-    }
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     if let Some(mode) = policy.directory_mode {
+        reject_symlink(path)?;
         builder.mode(mode);
     }
     builder.create(path)?;
@@ -206,7 +212,16 @@ pub fn read_bytes_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        AtomicFilePolicy, StagedFile, TEMP_SEQUENCE, parent_directory, read_bytes_bounded,
+        write_bytes_atomic,
+    };
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
+        sync::atomic::Ordering,
+    };
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {

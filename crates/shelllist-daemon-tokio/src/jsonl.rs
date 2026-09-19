@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use serde_json::{Value, json};
 use shelllist_daemon_core::{ClientMessage, ClientRequest, ClientRoute, DaemonEndpoint};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -19,7 +20,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_CAPACITY: usize = 16;
 
-#[derive(Clone)]
 struct RequestSlots {
     calls: Arc<Semaphore>,
     controls: Arc<Semaphore>,
@@ -120,8 +120,10 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
         OUTPUT_CAPACITY,
         config.pending_event_limit,
     );
-    let event_task = spawn_event_forwarder(dbus.clone(), output.clone());
-    let owner_task = spawn_owner_watcher(dbus.clone(), output.clone());
+    let event_task =
+        crate::AbortOnDrop(spawn_event_forwarder(dbus.clone(), output.clone()).abort_handle());
+    let owner_task =
+        crate::AbortOnDrop(spawn_owner_watcher(dbus.clone(), output.clone()).abort_handle());
 
     let mut calls = JoinSet::new();
     let request_slots = RequestSlots::new(config.max_in_flight_requests.max(1));
@@ -131,14 +133,13 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
         &mut calls,
         config.cancel_mode,
         config.call_failure,
-        request_slots,
+        &request_slots,
     )
     .await?;
     drain_calls(&mut calls, config.shutdown_timeout).await;
     cancel_active(&dbus, &output, config.cancel_mode).await;
 
-    event_task.abort();
-    owner_task.abort();
+    drop((event_task, owner_task));
     if let Some(id) = shutdown_id {
         output.send(OutputCommand::Shutdown(id)).await?;
     }
@@ -155,7 +156,7 @@ async fn request_loop(
     calls: &mut JoinSet<()>,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
-    request_slots: RequestSlots,
+    request_slots: &RequestSlots,
 ) -> Result<Option<String>> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read JSONL request")? {
@@ -167,12 +168,12 @@ async fn request_loop(
         }
         spawn_request(
             calls,
-            dbus.clone(),
-            output.clone(),
+            dbus,
+            output,
             request,
             cancel_mode,
             call_failure,
-            request_slots.clone(),
+            request_slots,
         )
         .await;
         reap_finished(calls);
@@ -184,20 +185,13 @@ async fn parse_request(line: &str, output: &OutputHandle) -> Result<Option<Clien
     if line.trim().is_empty() {
         return Ok(None);
     }
-    match serde_json::from_str::<ClientMessage>(line) {
-        Ok(request) => {
-            if let Err(error) = request.validate() {
-                output
-                    .send(OutputCommand::ProtocolError(error.into()))
-                    .await?;
-                return Ok(None);
-            }
-            Ok(Some(request))
-        }
+    let request = serde_json::from_str::<ClientMessage>(line)
+        .map_err(|error| error.to_string())
+        .and_then(|request| request.validate().map(|()| request).map_err(str::to_owned));
+    match request {
+        Ok(request) => Ok(Some(request)),
         Err(error) => {
-            output
-                .send(OutputCommand::ProtocolError(error.to_string()))
-                .await?;
+            output.send(OutputCommand::ProtocolError(error)).await?;
             Ok(None)
         }
     }
@@ -205,19 +199,19 @@ async fn parse_request(line: &str, output: &OutputHandle) -> Result<Option<Clien
 
 async fn spawn_request(
     calls: &mut JoinSet<()>,
-    dbus: ReconnectingClient,
-    output: OutputHandle,
+    dbus: &ReconnectingClient,
+    output: &OutputHandle,
     message: ClientMessage,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
-    request_slots: RequestSlots,
+    request_slots: &RequestSlots,
 ) {
     // Acquire before spawning: a semaphore inside the task still permits an
     // unbounded backlog of waiting tasks. Reject overload without replaying it.
     let permit = match request_slots.acquire(&message.request) {
         Ok(permit) => permit,
         Err(_) => {
-            let id = match &message.request {
+            let id = match message.request {
                 ClientRequest::Call { id, .. }
                 | ClientRequest::Subscribe { id, .. }
                 | ClientRequest::Cancel { id, .. }
@@ -226,7 +220,7 @@ async fn spawn_request(
             };
             let _ = output
                 .send(response_command(
-                    id.clone(),
+                    id,
                     Err("bridge request capacity exceeded; request was not sent".into()),
                     None,
                     message.route,
@@ -235,6 +229,8 @@ async fn spawn_request(
             return;
         }
     };
+    let dbus = dbus.clone();
+    let output = output.clone();
     calls.spawn(async move {
         let _permit = permit;
         let command = execute_request(dbus, &output, message, cancel_mode, call_failure).await;
@@ -372,7 +368,10 @@ fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> Join
         let mut last_error = None;
         loop {
             dbus.event_ready.send_replace(false);
-            let message = event_forwarding_error(&dbus, &output).await;
+            let Err(error) = forward_events(&dbus, &output).await else {
+                return;
+            };
+            let message = error.to_string();
             if output.send(OutputCommand::ResetCorrelation).await.is_err()
                 || !report_transport_error(&output, &mut last_error, message).await
             {
@@ -385,18 +384,20 @@ fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> Join
     })
 }
 
-async fn event_forwarding_error(dbus: &ReconnectingClient, output: &OutputHandle) -> String {
-    let result = async {
-        dbus.get()
-            .await?
-            .forward_events(output, &dbus.event_ready)
-            .await
+async fn forward_events(dbus: &ReconnectingClient, output: &OutputHandle) -> Result<()> {
+    let mut events = dbus.get().await?.events().await?;
+    // Retain readiness even when no subscription is currently waiting.
+    dbus.event_ready.send_replace(true);
+    while let Some(message) = events.next().await {
+        let (stream, event_json): (String, String) = message
+            .body()
+            .deserialize()
+            .context("decode daemon event signal")?;
+        let event = serde_json::from_str::<Value>(&event_json)
+            .unwrap_or_else(|_| json!({ "raw": event_json }));
+        output.send(OutputCommand::Event { stream, event }).await?;
     }
-    .await;
-    result.map_or_else(
-        |error| error.to_string(),
-        |()| "daemon event forwarding stopped".to_owned(),
-    )
+    anyhow::bail!("daemon event stream ended")
 }
 
 async fn report_transport_error(
@@ -521,12 +522,12 @@ mod tests {
         ));
         spawn_request(
             &mut calls,
-            dbus,
-            output.clone(),
+            &dbus,
+            &output,
             message,
             CancelMode::Json,
             |_, _| panic!("overloaded request was executed"),
-            slots.clone(),
+            &slots,
         )
         .await;
         assert!(calls.is_empty());

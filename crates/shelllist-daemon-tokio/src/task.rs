@@ -110,7 +110,7 @@ pub fn spawn_named(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{TaskGroup, catch_task, spawn_named};
     use std::sync::Arc;
 
     #[tokio::test]

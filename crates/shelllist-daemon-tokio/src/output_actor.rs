@@ -62,8 +62,8 @@ pub(crate) enum OutputCommand {
         cancelled_request_id: Option<String>,
         route: Option<ClientRoute>,
     },
-    OwnedIds {
-        route: ClientRoute,
+    ActiveIds {
+        route: Option<ClientRoute>,
         reply: oneshot::Sender<Vec<String>>,
     },
     Cancelled(String),
@@ -73,7 +73,6 @@ pub(crate) enum OutputCommand {
     },
     ProtocolError(String),
     TransportError(String),
-    ActiveIds(oneshot::Sender<Vec<String>>),
     ResetCorrelation,
     Shutdown(String),
 }
@@ -98,20 +97,20 @@ impl OutputHandle {
     }
 
     pub(crate) async fn owned_ids(&self, route: ClientRoute) -> Vec<String> {
-        let (reply, response) = oneshot::channel();
-        if self
-            .send(OutputCommand::OwnedIds { route, reply })
-            .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        response.await.unwrap_or_default()
+        self.query_ids(Some(route)).await
     }
 
     pub(crate) async fn active_ids(&self) -> Vec<String> {
+        self.query_ids(None).await
+    }
+
+    async fn query_ids(&self, route: Option<ClientRoute>) -> Vec<String> {
         let (reply, response) = oneshot::channel();
-        if self.send(OutputCommand::ActiveIds(reply)).await.is_err() {
+        if self
+            .send(OutputCommand::ActiveIds { route, reply })
+            .await
+            .is_err()
+        {
             return Vec::new();
         }
         response.await.unwrap_or_default()
@@ -126,10 +125,9 @@ enum EventDisposition {
 
 struct OutputState<P> {
     policy: P,
-    active_ids: HashSet<String>,
-    // Only live subscriptions consume routing storage. Ordinary request
-    // addresses travel with their task/response, not a long-lived dictionary.
-    subscription_routes: HashMap<String, ClientRoute>,
+    // One entry per live operation/subscription; only subscriptions retain a route.
+    // Ordinary request addresses live with their task/response, not this map.
+    active_ids: HashMap<String, Option<ClientRoute>>,
     pending_events: VecDeque<(String, String, Value)>,
     suppressed_ids: HashSet<String>,
     suppressed_order: VecDeque<String>,
@@ -140,8 +138,7 @@ impl<P: CorrelationPolicy> OutputState<P> {
     fn new(policy: P, pending_limit: usize) -> Self {
         Self {
             policy,
-            active_ids: HashSet::new(),
-            subscription_routes: HashMap::new(),
+            active_ids: HashMap::new(),
             pending_events: VecDeque::new(),
             suppressed_ids: HashSet::new(),
             suppressed_order: VecDeque::new(),
@@ -156,14 +153,12 @@ impl<P: CorrelationPolicy> OutputState<P> {
         if self.suppressed_ids.contains(&tracked.id) {
             return Vec::new();
         }
-        if tracked.kind == TrackedKind::Subscription
-            && let Some(route) = route
-        {
-            self.subscription_routes
-                .insert(tracked.id.clone(), route.clone());
-        }
         let pending = self.take_pending(&tracked.id);
-        self.active_ids.insert(tracked.id);
+        let active_route = self.active_ids.entry(tracked.id).or_default();
+        // A repeated response must not discard an already acknowledged route.
+        if let Some(route) = route.filter(|_| tracked.kind == TrackedKind::Subscription) {
+            *active_route = Some(route.clone());
+        }
         pending
     }
 
@@ -173,7 +168,7 @@ impl<P: CorrelationPolicy> OutputState<P> {
         };
         if self.suppressed_ids.contains(&id) {
             EventDisposition::Drop
-        } else if self.active_ids.contains(&id) {
+        } else if self.active_ids.contains_key(&id) {
             EventDisposition::Emit
         } else {
             EventDisposition::Buffer(id)
@@ -213,52 +208,51 @@ impl<P: CorrelationPolicy> OutputState<P> {
         self.suppressed_order.push_back(id);
     }
 
-    fn cancelled(&mut self, id: &str) {
-        self.active_ids.remove(id);
-        self.subscription_routes.remove(id);
-        self.take_pending(id);
-        self.suppress(id.to_owned());
-    }
-
-    fn emitted(&mut self, stream: &str, event: &Value) {
-        if self.policy.is_terminal(stream, event)
-            && let Some(id) = self.policy.event_id(stream, event)
-        {
-            self.active_ids.remove(&id);
-            self.subscription_routes.remove(&id);
-            self.take_pending(&id);
-            self.suppress(id);
-        }
+    fn cancelled(&mut self, id: String) {
+        self.active_ids.remove(&id);
+        self.pending_events
+            .retain(|(event_id, _, _)| event_id != &id);
+        self.suppress(id);
     }
 
     fn active_ids(&self) -> Vec<String> {
-        let mut ids = self.active_ids.iter().cloned().collect::<Vec<_>>();
+        let mut ids = self.active_ids.keys().cloned().collect::<Vec<_>>();
         ids.sort();
         ids
     }
 
     fn owned_ids(&self, owner: &ClientRoute) -> Vec<String> {
-        self.subscription_routes
+        self.active_ids
             .iter()
             .filter(|(_, route)| {
-                route.consumer_id == owner.consumer_id && route.generation == owner.generation
+                route.as_ref().is_some_and(|route| {
+                    route.consumer_id == owner.consumer_id && route.generation == owner.generation
+                })
             })
             .map(|(id, _)| id.clone())
             .collect()
     }
 
-    fn event_message(&self, stream: &str, event: &Value) -> Value {
+    fn event_message(&mut self, stream: &str, event: Value) -> Value {
+        let terminal = self
+            .policy
+            .is_terminal(stream, &event)
+            .then(|| self.policy.event_id(stream, &event))
+            .flatten();
         // Subscription ownership is independent of domain operation correlation.
         let route = event
             .get("subscription_id")
             .and_then(Value::as_str)
-            .and_then(|id| self.subscription_routes.get(id));
-        addressed_message(event_message(stream, event.clone()), route)
+            .and_then(|id| self.active_ids.get(id)?.as_ref());
+        let message = addressed_message(event_message(stream, event), route);
+        if let Some(id) = terminal {
+            self.cancelled(id);
+        }
+        message
     }
 
     fn reset_correlation(&mut self) {
         self.active_ids.clear();
-        self.subscription_routes.clear();
         self.pending_events.clear();
         self.suppressed_ids.clear();
         self.suppressed_order.clear();
@@ -350,12 +344,15 @@ where
             )
             .await
         }
-        OutputCommand::OwnedIds { route, reply } => {
-            let _ = reply.send(state.owned_ids(&route));
+        OutputCommand::ActiveIds { route, reply } => {
+            let ids = route
+                .as_ref()
+                .map_or_else(|| state.active_ids(), |route| state.owned_ids(route));
+            let _ = reply.send(ids);
             Ok(())
         }
         OutputCommand::Cancelled(id) => {
-            state.cancelled(&id);
+            state.cancelled(id);
             Ok(())
         }
         OutputCommand::Event { stream, event } => emit_event(writer, state, stream, event).await,
@@ -364,10 +361,6 @@ where
         }
         OutputCommand::TransportError(error) => {
             emit_line(writer, &transport_error_message(error)).await
-        }
-        OutputCommand::ActiveIds(reply) => {
-            let _ = reply.send(state.active_ids());
-            Ok(())
         }
         OutputCommand::ResetCorrelation => {
             state.reset_correlation();
@@ -390,7 +383,7 @@ where
     W: AsyncWrite + Unpin,
 {
     if let Some(cancelled) = cancelled_request_id {
-        state.cancelled(&cancelled);
+        state.cancelled(cancelled);
     }
     let (line, pending) = match result {
         Ok(response) => {
@@ -401,8 +394,7 @@ where
     };
     emit_line(writer, &addressed_message(line, route)).await?;
     for (stream, event) in pending {
-        let message = state.event_message(&stream, &event);
-        state.emitted(&stream, &event);
+        let message = state.event_message(&stream, event);
         emit_line(writer, &message).await?;
     }
     Ok(())
@@ -420,8 +412,7 @@ where
 {
     match state.event_disposition(&stream, &event) {
         EventDisposition::Emit => {
-            let message = state.event_message(&stream, &event);
-            state.emitted(&stream, &event);
+            let message = state.event_message(&stream, event);
             emit_line(writer, &message).await
         }
         EventDisposition::Buffer(id) => {

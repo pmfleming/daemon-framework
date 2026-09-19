@@ -1,7 +1,7 @@
 //! Isolated real-bus tests; never change the process session-bus environment.
 use futures::StreamExt;
 use serde_json::json;
-use shelllist_daemon_core::{ApiIdentity, Correlation};
+use shelllist_daemon_core::{ApiIdentity, Correlation, DaemonEndpoint};
 use std::{
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
@@ -130,14 +130,17 @@ async fn shared_emission_preserves_wire_shape_and_directed_delivery() {
     let server = bus.connection().await;
     let caller = bus.connection().await;
     let other = bus.connection().await;
+    server.request_name("org.shelllist.Test").await.unwrap();
     let destination = server.unique_name().unwrap().as_str();
-    let caller_proxy = zbus::Proxy::new(&caller, destination, "/test", "org.shelllist.Test")
-        .await
-        .unwrap();
+    let client = crate::JsonDbusClient::new(
+        caller.clone(),
+        DaemonEndpoint::new("test", "org.shelllist.Test", "/test", "org.shelllist.Test"),
+    );
     let other_proxy = zbus::Proxy::new(&other, destination, "/test", "org.shelllist.Test")
         .await
         .unwrap();
-    let mut received = caller_proxy.receive_signal("Event").await.unwrap();
+    let mut received = client.events().await.unwrap();
+    drop(client); // The signal stream owns its connection, not a borrowed proxy.
     let mut unrelated = other_proxy.receive_signal("Event").await.unwrap();
     let emitter = zbus::object_server::SignalEmitter::new(&server, "/test")
         .unwrap()
