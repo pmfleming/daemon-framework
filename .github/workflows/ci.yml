@@ -31,7 +31,7 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Check out current consumers
         run: |
-          for repo in shelllist shelllist-hyprland app-daemon bar-daemon bt-daemon clip-daemon nm-daemon; do
+          for repo in shelllist app-daemon bar-daemon bt-daemon clip-daemon nm-daemon; do
             git clone --depth 1 --branch main "https://github.com/pmfleming/$repo.git" "$repo"
           done
       - name: Test shared source policy

@@ -82,7 +82,7 @@ class LocalBuildTests(unittest.TestCase):
         framework = self.repository("daemon-framework", files={"source": "current"})
         cargo = '[dependencies]\n' + "\n".join(
             f'{crate} = {{ path = "../daemon-framework/crates/{crate}" }}'
-            for crate in ("shelllist-daemon-core", "shelllist-daemon-tokio")
+            for crate in ("shelllist-daemon-core", "shelllist-daemon-tokio", "shelllist-hyprland")
         )
         app = self.repository("app-daemon", {"daemonFramework": {"url": "git+file:../daemon-framework"}}, {"Cargo.toml": cargo})
         root = self.repository("shelllist", {
@@ -128,6 +128,58 @@ class LocalBuildTests(unittest.TestCase):
             (app / "vendor/daemon-framework").mkdir(parents=True)
             with self.assertRaisesRegex(ValueError, "vendored"):
                 local.validate_policy({app: app}, self.inputs(root))
+
+    def test_hyprland_consumers_require_the_framework_crate(self):
+        root, app, framework = self.matrix()
+        manifest = (app / "Cargo.toml").read_text()
+        bar = self.repository("bar-daemon", self.inputs(app), {"Cargo.toml": manifest})
+        sources = {app: app, bar: bar, framework: framework}
+        valid = 'shelllist-hyprland = { path = "../daemon-framework/crates/shelllist-hyprland" }'
+        invalid = [
+            'shelllist-hyprland = { path = "../shelllist-hyprland" }',
+            'shelllist-hyprland = { path = "vendor/shelllist-hyprland" }',
+            'shelllist-hyprland = { path = "../daemon-framework/crates/shelllist-hyprland", git = "https://example.org/private" }',
+            'shelllist-hyprland = "0.1"',
+            '',
+        ]
+        with patch.object(local, "read_inputs", self.inputs):
+            local.validate_policy(sources, self.inputs(root))
+            for consumer in (app, bar):
+                for replacement in invalid:
+                    with self.subTest(consumer=consumer.name, dependency=replacement):
+                        (consumer / "Cargo.toml").write_text(manifest.replace(valid, replacement))
+                        with self.assertRaisesRegex(ValueError, "shelllist-hyprland must use the shared sibling"):
+                            local.validate_policy(sources, self.inputs(root))
+                        (consumer / "Cargo.toml").write_text(manifest)
+                (consumer / "vendor/shelllist-hyprland").mkdir(parents=True)
+                with self.assertRaisesRegex(ValueError, "vendored"):
+                    local.validate_policy(sources, self.inputs(root))
+                (consumer / "vendor/shelllist-hyprland").rmdir()
+
+    def test_non_hyprland_daemon_does_not_require_the_crate(self):
+        root, app, framework = self.matrix()
+        manifest = "\n".join(line for line in (app / "Cargo.toml").read_text().splitlines()
+                             if not line.startswith("shelllist-hyprland"))
+        bt = self.repository("bt-daemon", self.inputs(app), {"Cargo.toml": manifest})
+        with patch.object(local, "read_inputs", self.inputs):
+            local.validate_policy({bt: bt, framework: framework}, self.inputs(root))
+
+    def test_standalone_hyprland_inputs_rejected(self):
+        root, app, framework = self.matrix()
+        sources = {app: app, framework: framework}
+        with patch.object(local, "read_inputs", self.inputs):
+            for extra in (
+                {"shelllist-hyprland": {"url": "git+file:../shelllist-hyprland"}},
+                {"bar-daemon": {"inputs": {"hyprlandIpc": {"follows": "shelllist-hyprland"}}}},
+                {"shelllist": {"inputs": {"shelllist-hyprland": {"follows": "shelllist-hyprland"}}}},
+            ):
+                with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "not a separate input"):
+                    local.validate_policy(sources, local.merge(self.inputs(root), extra))
+            inputs = self.inputs(app)
+            inputs["hyprlandIpc"] = {"url": "git+file:../shelllist-hyprland"}
+            (app / "inputs.json").write_text(json.dumps(inputs))
+            with self.assertRaisesRegex(ValueError, "not a separate input"):
+                local.validate_policy(sources, self.inputs(root))
 
     def test_missing_root_follows_rejected(self):
         root, app, framework = self.matrix()

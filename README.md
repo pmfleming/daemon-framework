@@ -6,11 +6,12 @@ Shared Rust infrastructure for the Shelllist daemon family.
 
 - `shelllist-daemon-core` — protocol/envelopes, JSONL wire, fixtures, atomic/staged files, bounded reads, and owner-scoped operation bookkeeping.
 - `shelllist-daemon-tokio` — D-Bus/JSONL transport, managed subscriptions, connection-scoped owner monitoring, task groups, bounded blocking lanes, resume detection, event forwarding, and async file helpers.
+- `shelllist-hyprland` — optional Hyprland IPC transport and compositor work-area interpretation shared by `app-daemon` and `bar-daemon`. It is a separate crate, not a dependency of core/Tokio or the other daemons.
 - `shelllist-protocol-js` — build tool that generates frontend constants from daemon-owned protocol registries.
 
 The Shelllist-owned fuzzy ranking process lives with the frontend. Domain policy and frontend ranking do not belong in this infrastructure workspace.
 
-Domain policy remains in `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon`, and `nm-daemon`. This workspace contains only reusable process infrastructure and services.
+Domain policy remains in `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon`, and `nm-daemon`. This workspace contains only reusable process infrastructure, platform adapters and services. Hyprland protocol/rule interpretation belongs in `shelllist-hyprland`; cache/subscriber lifetime stays in `bar-daemon`, and UI placement stays in Shelllist. See the [crate documentation](crates/shelllist-hyprland/README.md) for migration provenance.
 
 ## Server infrastructure
 

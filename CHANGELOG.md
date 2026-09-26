@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Consolidated `shelllist-hyprland` into a separate workspace crate, preserving its API and tests. App/bar daemons share it through the framework; no standalone checkout or vendored copy is needed.
+
 - Reused established fuzzy matching and edit-distance implementations in the search service.
 - Reduced JSONL and output actor branching while preserving ordered output behavior.
 - Consolidated related core identity and envelope modules to improve locality.

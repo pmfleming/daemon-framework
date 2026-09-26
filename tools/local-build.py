@@ -123,20 +123,32 @@ def prune_lock(lock, names):
 
 def validate_policy(sources, root_inputs):
     """Fail closed if packaging slowly reintroduces a private framework."""
+    def reject_standalone_hyprland(inputs):
+        for name, spec in inputs.items():
+            if name in {"hyprlandIpc", "shelllist-hyprland"}:
+                raise ValueError("shelllist-hyprland belongs in daemon-framework, not a separate input")
+            reject_standalone_hyprland(spec.get("inputs", {}))
+
+    reject_standalone_hyprland(root_inputs)
     for source in sources:
+        inputs = read_inputs(sources[source])
+        reject_standalone_hyprland(inputs)
         if source.name not in {"app-daemon", "bar-daemon", "bt-daemon", "clip-daemon", "nm-daemon"}:
             continue
         import tomllib
         cargo = tomllib.loads((sources[source] / "Cargo.toml").read_text())
-        for crate in ("shelllist-daemon-core", "shelllist-daemon-tokio"):
-            dependency = cargo["dependencies"][crate]
-            if dependency.get("path") != f"../daemon-framework/crates/{crate}" or any(
+        crates = ["shelllist-daemon-core", "shelllist-daemon-tokio"]
+        if source.name in {"app-daemon", "bar-daemon"} or "shelllist-hyprland" in cargo["dependencies"]:
+            crates.append("shelllist-hyprland")
+        for crate in crates:
+            dependency = cargo["dependencies"].get(crate, {})
+            if not isinstance(dependency, dict) or dependency.get("path") != f"../daemon-framework/crates/{crate}" or any(
                 key in dependency for key in ("git", "rev", "branch", "tag")
             ):
                 raise ValueError(f"{source.name}: {crate} must use the shared sibling framework")
-        if (sources[source] / "vendor/daemon-framework").exists():
-            raise ValueError(f"{source.name}: remove the private vendored framework")
-        inputs = read_inputs(sources[source])
+        for private in ("vendor/daemon-framework", "vendor/shelllist-hyprland"):
+            if (sources[source] / private).exists():
+                raise ValueError(f"{source.name}: remove the private vendored framework crate at {private}")
         framework = local_path(inputs.get("daemonFramework", {}), source)
         if framework != source.parent / "daemon-framework":
             raise ValueError(f"{source.name}: daemonFramework must use the current sibling")
