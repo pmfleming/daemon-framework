@@ -196,7 +196,8 @@ def prepare(root, destination, root_is_snapshot=False):
             if target.exists():
                 raise ValueError(f"local repository basename collision: {source}")
             if source == root and root_is_snapshot:
-                shutil.copytree(source, target)
+                # Preserve the frozen tree's identity, including link types and targets.
+                shutil.copytree(source, target, symlinks=True)
             else:
                 snapshot(source, target)
             sources[source] = target

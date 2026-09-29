@@ -60,6 +60,30 @@ class LocalBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "symlink escapes"):
             local.snapshot(root, self.base / "snapshot")
 
+    def test_prepared_snapshot_preserves_internal_symlinks(self):
+        root = self.repository("project", files={"dir/source": "committed"})
+        links = {"source-link": "dir/source", "dir-link": "dir", "dir/relative": "../source-link"}
+        for name, target in links.items():
+            (root / name).symlink_to(target)
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        frozen = self.base / "frozen"
+        local.snapshot(root, frozen)
+        with patch.object(local, "read_inputs", self.inputs), patch.object(local, "run") as run:
+            result = local.prepare(frozen, self.base / "prepared", root_is_snapshot=True)
+        prepared = Path(result["sources"][str(frozen)])
+        self.assertEqual(result["flake"], f"path:{prepared}")
+        run.assert_called_once_with(
+            "nix", "flake", "lock", f"path:{prepared}",
+            "--output-lock-file", str(prepared / "flake.lock"),
+        )
+        for tree in (frozen, prepared):
+            for name, target in links.items():
+                with self.subTest(tree=tree, link=name):
+                    self.assertTrue((tree / name).is_symlink())
+                    self.assertEqual((tree / name).readlink(), Path(target))
+            self.assertEqual((tree / "dir/relative").read_text(), "committed")
+            self.assertEqual((tree / "dir-link/source").read_text(), "committed")
+
     def test_branch_and_revision_pins_rejected(self):
         for suffix in ("?ref=main", "?rev=123", "#main"):
             with self.assertRaises(ValueError):
