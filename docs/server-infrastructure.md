@@ -53,8 +53,10 @@ private event on failure or replay accepted work.
 
 The old manual `insert`/`remove` task lifecycle has been replaced by managed spawn.
 Callers should not retain a second registry or create their own start barrier.
-The standalone `wait_for_owner_loss` helpers remain available; repeated waits
-should instead share an explicit `OwnerLossMonitor`.
+Standalone waits use an explicit connection-scoped `OwnerLossMonitor::wait`.
+The unused one-shot owner-watch wrappers and registry-wide `cancel_all`/
+`cancel_owner` APIs have been removed. Use managed owner lifetimes,
+`cancel_owned` for individual requests and `shutdown` to end a generation.
 
 Actor-based servers can use `OwnerLossMonitor::subscribe`. `Lagged` requires
 rechecking the actor's current owner set with `has_owner`; `Stopped` is a terminal

@@ -247,11 +247,9 @@ fn window_count(flags: &str, workspace: &Workspace, clients: &[Window]) -> usize
         })
         .count()
 }
-fn range(value: &str) -> Option<(i64, i64)> {
-    let (low, high) = value.split_once('-').map_or((value, value), |pair| pair);
-    let low = low.parse::<u32>().ok()? as i64;
-    let high = high.parse::<u32>().ok()? as i64;
-    Some((low, high))
+fn range(value: &str) -> Option<std::ops::RangeInclusive<i64>> {
+    let (low, high) = value.split_once('-').unwrap_or((value, value));
+    Some(low.parse::<u32>().ok()? as i64..=high.parse::<u32>().ok()? as i64)
 }
 fn term(
     kind: char,
@@ -263,8 +261,7 @@ fn term(
     let boolean = matches!(value, "true" | "1" | "yes" | "on");
     match kind {
         'r' => {
-            value.contains('-')
-                && range(value).is_some_and(|(low, high)| (low..=high).contains(&workspace.id))
+            value.contains('-') && range(value).is_some_and(|range| range.contains(&workspace.id))
         }
         's' => (workspace.id < -1 && workspace.id > -1337) == boolean,
         'n' => match value.split_once(':') {
@@ -277,8 +274,8 @@ fn term(
             let split = value
                 .find(|c: char| !"tfpgv".contains(c))
                 .unwrap_or(value.len());
-            range(&value[split..]).is_some_and(|(low, high)| {
-                (low..=high)
+            range(&value[split..]).is_some_and(|range| {
+                range
                     .contains(&(window_count(&value[..split], workspace, &snapshot.clients) as i64))
             })
         }
@@ -312,22 +309,19 @@ fn matches(selector: &str, workspace: &Workspace, monitor: &Monitor, snapshot: &
         return workspace.name == rest;
     }
     while !rest.is_empty() {
-        let Some(kind) = rest.chars().next() else {
+        let Some((clause, tail)) = rest.split_once(']') else {
             return false;
         };
-        if !"rsnmwf".contains(kind) {
+        let Some((kind, value)) = clause.split_once('[') else {
+            return false;
+        };
+        let [kind] = kind.as_bytes() else {
+            return false;
+        };
+        if !term(char::from(*kind), value, workspace, monitor, snapshot) {
             return false;
         }
-        let Some(body) = rest.get(1..).and_then(|s| s.strip_prefix('[')) else {
-            return false;
-        };
-        let Some(end) = body.find(']') else {
-            return false;
-        };
-        if !term(kind, &body[..end], workspace, monitor, snapshot) {
-            return false;
-        }
-        rest = body[end + 1..].trim_start();
+        rest = tail.trim_start();
     }
     true
 }

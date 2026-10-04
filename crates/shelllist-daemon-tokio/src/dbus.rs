@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use zbus::{message::Header, names::UniqueName, object_server::SignalEmitter};
+use zbus::{message::Header, object_server::SignalEmitter};
 
 use shelllist_daemon_core::DaemonEndpoint;
 
@@ -100,17 +100,4 @@ pub fn directed_emitter(
         Some(sender) => emitter.to_owned().set_destination(sender.to_owned().into()),
         None => emitter.to_owned(),
     }
-}
-
-pub async fn wait_for_owner_loss(
-    connection: &zbus::Connection,
-    owner: UniqueName<'static>,
-) -> Result<()> {
-    wait_for_owner_name_loss(connection, owner.as_str()).await
-}
-
-pub async fn wait_for_owner_name_loss(connection: &zbus::Connection, owner: &str) -> Result<()> {
-    crate::OwnerLossMonitor::new(connection.clone())
-        .wait(owner)
-        .await
 }

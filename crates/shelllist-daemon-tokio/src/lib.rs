@@ -22,7 +22,7 @@ pub use resume::{ResumeDetector, monitor_resumes, suspend_offset};
 pub use task::{AbortOnDrop, TaskGroup, catch_task, spawn_named};
 mod subscription;
 
-pub use dbus::{JsonDbusClient, directed_emitter, wait_for_owner_loss, wait_for_owner_name_loss};
+pub use dbus::{JsonDbusClient, directed_emitter};
 pub use jsonl::{CallFailure, CallFailureMapper, CancelMode, JsonlClientConfig, run_jsonl_client};
 pub use output_actor::{BasicCorrelation, CorrelationPolicy, TrackedId, TrackedKind};
 pub use shutdown::wait_for_shutdown;

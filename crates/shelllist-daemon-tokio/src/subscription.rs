@@ -198,30 +198,11 @@ impl OwnedTaskRegistry {
         }
     }
 
-    pub async fn cancel_owner(&self, owner: &str) -> usize {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let before = state.tasks.len();
-        state.tasks.retain(|_, task| {
-            let keep = task.owner.as_deref() != Some(owner);
-            if !keep {
-                task.task.abort();
-            }
-            keep
-        });
-        before - state.tasks.len()
-    }
-
-    pub async fn cancel_all(&self) {
-        self.drain(false).await;
-    }
+    /// Closes admission before aborting and joining every registered worker.
     pub async fn shutdown(&self) {
-        self.drain(true).await;
-    }
-
-    async fn drain(&self, close: bool) {
         let tasks = {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-            state.closed |= close;
+            state.closed = true;
             state
                 .tasks
                 .drain()
@@ -285,7 +266,7 @@ mod tests {
             Err(TaskAdmissionError::Full)
         );
         assert!(!registry.cancel_owned("one", Some("b")).await);
-        assert_eq!(registry.cancel_owner("a").await, 1);
+        assert!(registry.cancel_owned("one", Some("a")).await);
         assert!(registry.cancel_owned("two", Some("b")).await);
         registry.shutdown().await;
         assert_eq!(
