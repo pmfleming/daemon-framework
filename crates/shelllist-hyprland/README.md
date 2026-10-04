@@ -37,5 +37,12 @@ snapshots fail explicitly. `work_area::geometry_event` identifies invalidating
 compositor events. bar-daemon owns the shared on-demand cache and subscriber
 lifetime, rather than creating a poller per UI surface.
 
+`Client::preferences` reads `animations:enabled` over the native command socket
+and returns a typed `Preferences` value. Boolean and legacy integer 0/1 replies
+are accepted; missing, malformed, contradictory or wrong-option replies fail
+instead of guessing an enabled default. `preferences::preference_event` identifies
+config reloads. bar-daemon owns the shared cache, failure retry and subscription;
+Shelllist retains environment overrides and animation presentation policy.
+
 Other domain models remain in their owning daemons. Shelllist keeps QScreen size,
 pixel clamping, window placement and presentation-specific layer rules.

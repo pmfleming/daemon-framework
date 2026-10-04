@@ -1,3 +1,4 @@
+pub mod preferences;
 pub mod work_area;
 #[cfg(test)]
 mod work_area_tests;
@@ -68,6 +69,11 @@ impl Client {
     ) -> Result<std::collections::BTreeMap<String, work_area::Insets>> {
         let reply = self.request("[[BATCH]]j/monitors;j/workspaces;j/workspacerules;j/clients;j/getoption general:gaps_out").await?;
         work_area::parse_work_areas(&reply)
+    }
+
+    /// Read animation preferences through the same bounded native IPC transport.
+    pub async fn preferences(&self) -> Result<preferences::Preferences> {
+        preferences::parse(&self.request("j/getoption animations:enabled").await?)
     }
 
     pub async fn event_socket(&self) -> Result<UnixStream> {

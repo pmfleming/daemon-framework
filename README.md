@@ -11,7 +11,7 @@ Shared Rust infrastructure for the Shelllist daemon family.
 
 The Shelllist-owned fuzzy ranking process lives with the frontend. Domain policy and frontend ranking do not belong in this infrastructure workspace.
 
-Domain policy remains in `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon`, and `nm-daemon`. This workspace contains only reusable process infrastructure, platform adapters and services. Hyprland protocol/rule interpretation belongs in `shelllist-hyprland`; cache/subscriber lifetime stays in `bar-daemon`, and UI placement stays in Shelllist. See the [crate documentation](crates/shelllist-hyprland/README.md) for migration provenance.
+Domain policy remains in `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon`, and `nm-daemon`. This workspace contains only reusable process infrastructure, platform adapters and services. Hyprland protocol/rule and compositor-preference interpretation belongs in `shelllist-hyprland`; cache/subscriber lifetime stays in `bar-daemon`, and UI placement and animation policy stay in Shelllist. See the [crate documentation](crates/shelllist-hyprland/README.md) for migration provenance.
 
 ## Server infrastructure
 
