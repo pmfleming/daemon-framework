@@ -110,8 +110,9 @@ ingress capacity, and direct D-Bus clients cannot bypass that ingress bound.
 
 `OwnedOperations<T>` supplies owner-scoped admission and single-winner terminal
 claims. Synchronize admission, insertion and state transitions in the caller's
-mutex/actor. `RecentResults<T>` supplies bounded optional-TTL retention and owned
-lookup. It does not abort tasks, choose result visibility, interpret progress,
+mutex/actor. `drain()` claims all active records without cloning their IDs or
+owners; the caller still chooses cancellation side effects and retained results.
+`RecentResults<T>` supplies bounded optional-TTL retention and owned lookup. It does not abort tasks, choose result visibility, interpret progress,
 retry work or cross an operation's commit boundary.
 
 App and Bluetooth use shared active-operation records. App, Bluetooth and NM use
@@ -126,6 +127,14 @@ source closure. Daemons map those notifications to their existing event names an
 recovery actions. `emit_json_event` preserves the supplied emitter's destination,
 interface and the domain's envelope fields. It returns emission failures rather
 than choosing a global recovery policy.
+
+## Client correlation
+
+`CorrelationPolicy::operation_id` borrows the domain-selected response ID. The
+default `response_id` gives it precedence over the standard subscription ID and
+allocates only the selected ID. Acceptance checks, event paths and terminal names
+remain daemon policy. Existing custom `response_id` implementations still work;
+`BasicCorrelation` uses the subscription-only defaults.
 
 ## Validation and deployment
 

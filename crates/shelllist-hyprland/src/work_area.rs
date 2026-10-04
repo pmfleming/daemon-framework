@@ -208,6 +208,24 @@ fn monitor_matches(selector: &str, monitor: &Monitor, monitors: &[Monitor]) -> b
     }
     monitor.name == selector
 }
+impl Window {
+    fn on(&self, workspace: &Workspace) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(|w| w.id == workspace.id)
+    }
+
+    fn matches_flags(&self, flags: &str) -> bool {
+        flags.chars().all(|flag| match flag {
+            't' => !self.floating,
+            'f' => self.floating,
+            'p' => self.pinned,
+            'v' => !self.hidden && self.visible != Some(false),
+            _ => true, // Group deduplication is handled by window_count.
+        })
+    }
+}
+
 fn window_count(flags: &str, workspace: &Workspace, clients: &[Window]) -> usize {
     if flags.is_empty() {
         return workspace.windows;
@@ -215,23 +233,15 @@ fn window_count(flags: &str, workspace: &Workspace, clients: &[Window]) -> usize
     let mut groups = HashSet::new();
     clients
         .iter()
+        .filter(|c| c.on(workspace) && c.mapped && c.matches_flags(flags))
         .filter(|c| {
-            if c.workspace.as_ref().is_none_or(|w| w.id != workspace.id)
-                || !c.mapped
-                || flags.contains('t') && c.floating
-                || flags.contains('f') && !c.floating
-                || flags.contains('p') && !c.pinned
-                || flags.contains('v') && (c.hidden || c.visible == Some(false))
-            {
-                return false;
-            }
             if !flags.contains('g') {
                 return true;
             }
             if c.grouped.is_empty() {
                 return false;
             }
-            let mut group = c.grouped.clone();
+            let mut group: Vec<_> = c.grouped.iter().collect();
             group.sort();
             groups.insert(group)
         })
@@ -257,15 +267,11 @@ fn term(
                 && range(value).is_some_and(|(low, high)| (low..=high).contains(&workspace.id))
         }
         's' => (workspace.id < -1 && workspace.id > -1337) == boolean,
-        'n' => {
-            if let Some(prefix) = value.strip_prefix("s:") {
-                workspace.name.starts_with(prefix)
-            } else if let Some(suffix) = value.strip_prefix("e:") {
-                workspace.name.ends_with(suffix)
-            } else {
-                (workspace.id <= -1337) == boolean
-            }
-        }
+        'n' => match value.split_once(':') {
+            Some(("s", prefix)) => workspace.name.starts_with(prefix),
+            Some(("e", suffix)) => workspace.name.ends_with(suffix),
+            _ => (workspace.id <= -1337) == boolean,
+        },
         'm' => monitor_matches(value, monitor, &snapshot.monitors),
         'w' => {
             let split = value
@@ -276,16 +282,20 @@ fn term(
                     .contains(&(window_count(&value[..split], workspace, &snapshot.clients) as i64))
             })
         }
-        'f' => match value {
-            "-1" => !workspace.hasfullscreen,
-            "0" | "1" => snapshot.clients.iter().any(|c| {
-                c.workspace.as_ref().is_some_and(|w| w.id == workspace.id)
-                    && c.fullscreen == if value == "0" { 2 } else { 1 }
-            }),
-            _ => true,
-        },
+        'f' => fullscreen_matches(value, workspace, &snapshot.clients),
         _ => false,
     }
+}
+fn fullscreen_matches(value: &str, workspace: &Workspace, clients: &[Window]) -> bool {
+    let mode = match value {
+        "-1" => return !workspace.hasfullscreen,
+        "0" => 2,
+        "1" => 1,
+        _ => return true,
+    };
+    clients
+        .iter()
+        .any(|c| c.on(workspace) && c.fullscreen == mode)
 }
 fn matches(selector: &str, workspace: &Workspace, monitor: &Monitor, snapshot: &Snapshot) -> bool {
     let mut rest = selector.trim();
@@ -339,10 +349,10 @@ fn insets(snapshot: &Snapshot) -> BTreeMap<String, Insets> {
             let workspace = snapshot.workspaces.iter().find(|w| w.id == active)?;
             let mut gaps = snapshot.gaps;
             for rule in &snapshot.rules {
-                if let Some(value) = &rule.gaps {
-                    if matches(&rule.selector, workspace, monitor, snapshot) {
-                        gaps = css(value).unwrap_or(gaps);
-                    }
+                if let Some(value) = &rule.gaps
+                    && matches(&rule.selector, workspace, monitor, snapshot)
+                {
+                    gaps = css(value).unwrap_or(gaps);
                 }
             }
             Some((

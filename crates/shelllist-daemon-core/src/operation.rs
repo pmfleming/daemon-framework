@@ -89,6 +89,11 @@ impl<T> OwnedOperations<T> {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &OwnedOperation<T>)> {
         self.active.iter()
     }
+    /// Claims every terminal transition without cloning IDs or owners.
+    /// Dropping the iterator also removes any unconsumed entries.
+    pub fn drain(&mut self) -> impl Iterator<Item = OwnedOperation<T>> + '_ {
+        self.active.drain().map(|(_, entry)| entry)
+    }
 }
 
 struct Finished<T> {
@@ -166,6 +171,10 @@ mod tests {
         assert_eq!(active.claim_owned("one", Some("a")).unwrap().value, 1);
         assert!(active.claim("one").is_none());
         assert!(active.admit(Some("a")).is_ok());
+        active.insert("three".into(), Some("a".into()), 3).unwrap();
+        assert!(active.drain().next().is_some());
+        assert_eq!(active.iter().count(), 0);
+        assert!(active.admit(Some("b")).is_ok());
     }
     #[test]
     fn terminal_results_are_bounded_replaced_and_expire() {

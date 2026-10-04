@@ -199,11 +199,17 @@ fn valid_signature(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_signature;
+    use super::{COMMAND_SOCKET, Client, EVENT_SOCKET, Event, valid_signature, watch_events_with};
+    use std::time::Duration;
+    use tokio::{
+        fs,
+        io::{AsyncReadExt, AsyncWriteExt},
+        sync::mpsc,
+        time,
+    };
 
     #[tokio::test]
     async fn request_uses_bounded_socket_protocol_without_a_process() {
-        use super::*;
         let root = tempfile::tempdir().unwrap();
         let instance = root.path().join("hypr/test");
         fs::create_dir_all(&instance).await.unwrap();
@@ -222,7 +228,6 @@ mod tests {
 
     #[tokio::test]
     async fn event_stream_reports_reconnects_and_backs_off_after_eof() {
-        use super::*;
         let root = tempfile::tempdir().unwrap();
         let instance = root.path().join("hypr/test");
         fs::create_dir_all(&instance).await.unwrap();

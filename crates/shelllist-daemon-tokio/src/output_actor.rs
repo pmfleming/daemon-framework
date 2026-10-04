@@ -24,23 +24,26 @@ pub struct TrackedId {
 }
 
 pub trait CorrelationPolicy: Send + Sync + 'static {
-    fn response_id(&self, response: &Value) -> Option<TrackedId>;
-    fn event_id(&self, stream: &str, event: &Value) -> Option<String>;
-    fn is_terminal(&self, stream: &str, event: &Value) -> bool;
-}
+    /// Return only operation IDs that domain policy considers trackable.
+    /// Borrowing keeps allocation in the common response path, after selection.
+    fn operation_id<'a>(&self, _response: &'a Value) -> Option<&'a str> {
+        None
+    }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BasicCorrelation;
-
-impl CorrelationPolicy for BasicCorrelation {
+    /// Operations take precedence over the standard subscription envelope.
+    /// Override this for protocols with a different subscription shape.
     fn response_id(&self, response: &Value) -> Option<TrackedId> {
-        response
-            .pointer("/data/subscription/id")
-            .and_then(Value::as_str)
-            .map(|id| TrackedId {
-                id: id.to_owned(),
-                kind: TrackedKind::Subscription,
-            })
+        let (id, kind) = match self.operation_id(response) {
+            Some(id) => (id, TrackedKind::Operation),
+            None => (
+                response.pointer("/data/subscription/id")?.as_str()?,
+                TrackedKind::Subscription,
+            ),
+        };
+        Some(TrackedId {
+            id: id.to_owned(),
+            kind,
+        })
     }
 
     fn event_id(&self, _stream: &str, event: &Value) -> Option<String> {
@@ -54,6 +57,11 @@ impl CorrelationPolicy for BasicCorrelation {
         false
     }
 }
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BasicCorrelation;
+
+impl CorrelationPolicy for BasicCorrelation {}
 
 pub(crate) enum OutputCommand {
     Response {
@@ -445,9 +453,40 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        BasicCorrelation, OutputCommand, OutputState, run_output_actor,
-        spawn_output_actor_with_writer,
+        BasicCorrelation, CorrelationPolicy, OutputCommand, OutputState, TrackedKind,
+        run_output_actor, spawn_output_actor_with_writer,
     };
+
+    struct Operations;
+    impl CorrelationPolicy for Operations {
+        fn operation_id<'a>(&self, response: &'a Value) -> Option<&'a str> {
+            response.get("operation")?.as_str()
+        }
+    }
+
+    #[test]
+    fn response_defaults_prioritize_operations_and_fall_back_on_invalid_ids() {
+        let mut response = json!({"operation": "op", "data": {"subscription": {"id": "sub"}}});
+        let operation = Operations.response_id(&response).unwrap();
+        assert_eq!(
+            (operation.id.as_str(), operation.kind),
+            ("op", TrackedKind::Operation)
+        );
+        for invalid in [Value::Null, json!(42), json!({})] {
+            response["operation"] = invalid;
+            assert_eq!(
+                Operations.response_id(&response),
+                BasicCorrelation.response_id(&response)
+            );
+            assert_eq!(Operations.response_id(&response).unwrap().id, "sub");
+        }
+        assert!(Operations.response_id(&json!({})).is_none());
+        assert!(
+            BasicCorrelation
+                .response_id(&json!({"data": {"subscription": {"id": 42}}}))
+                .is_none()
+        );
+    }
 
     async fn render(commands: Vec<OutputCommand>) -> Result<Vec<Value>> {
         let (writer, mut reader) = duplex(4096);

@@ -1,4 +1,4 @@
-use super::work_area::*;
+use super::work_area::{geometry_event, parse_work_areas};
 use serde_json::{Value, json};
 
 fn fixture() -> [Value; 5] {
@@ -69,10 +69,18 @@ fn smart_gaps_and_group_visibility_filters() {
     parts[3][1]["floating"] = json!(true);
     parts[3][1]["pinned"] = json!(true);
     parts[3][1]["visible"] = json!(false);
-    for selector in ["w[p1]", "w[fv0]"] {
+    for selector in ["w[p1]", "w[fv0]", "w[tf0]"] {
         parts[2] = json!([{"workspaceString":selector,"gapsOut":[0,0,0,0]}]);
         assert_eq!(margins(&parts, "eDP-1")["top"], 51.0);
     }
+    parts[3][0]["fullscreen"] = json!(2);
+    for (selector, top) in [("f[0]", 51.0), ("f[1]", 53.0), ("f[other]", 51.0)] {
+        parts[2] = json!([{"workspaceString":selector,"gapsOut":[0,0,0,0]}]);
+        assert_eq!(margins(&parts, "eDP-1")["top"], top, "{selector}");
+    }
+    parts[3][0]["workspace"]["id"] = json!(3);
+    parts[2] = json!([{"workspaceString":"f[0]","gapsOut":[0,0,0,0]}]);
+    assert_eq!(margins(&parts, "eDP-1")["top"], 53.0);
 }
 #[test]
 fn named_special_monitor_and_malformed_selectors() {
@@ -93,10 +101,7 @@ fn named_special_monitor_and_malformed_selectors() {
     assert_eq!(margins(&parts, "DP-1")["top"], 82.0);
     parts[0][1]["x"] = json!(1537);
     assert_eq!(margins(&parts, "DP-1")["top"], 80.0);
-    for selector in ["r[1-4] junk", "w[bad]", "n[true]", "m[right]", ""] {
-        if selector.is_empty() {
-            continue;
-        }
+    for selector in ["r[1-4] junk", "w[bad]", "n[true]", "m[right]"] {
         parts[2] = json!([{"workspaceString":selector,"gapsOut":[0,0,0,0]}]);
         assert_eq!(margins(&parts, "eDP-1")["top"], 53.0);
     }
