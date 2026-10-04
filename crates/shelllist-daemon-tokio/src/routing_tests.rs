@@ -112,7 +112,9 @@ async fn early_events_follow_the_addressed_reply_and_stay_owner_scoped() -> Resu
             .is_empty()
     );
     let repeated = json!({ "data": { "subscription": { "id": "sub-a" } } });
-    output.state.activate(&repeated, None);
+    output
+        .state
+        .activate(BasicCorrelation.response_id(&repeated), None);
     assert_eq!(
         output.state.owned_ids(&route("a", 1, RouteKind::Control)),
         ["sub-a"]

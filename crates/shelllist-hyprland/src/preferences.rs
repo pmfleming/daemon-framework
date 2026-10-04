@@ -45,9 +45,8 @@ pub fn preference_event(event: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Client;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use super::{parse, preference_event};
+    use crate::tests::command_server;
 
     #[test]
     fn parses_boolean_and_legacy_integer_options_without_guessing() {
@@ -84,21 +83,11 @@ mod tests {
 
     #[tokio::test]
     async fn preference_read_uses_native_bounded_command_transport() {
-        let root = tempfile::tempdir().unwrap();
-        let instance = root.path().join("hypr/preferences-test");
-        tokio::fs::create_dir_all(&instance).await.unwrap();
-        let listener = tokio::net::UnixListener::bind(instance.join(".socket.sock")).unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut command = String::new();
-            stream.read_to_string(&mut command).await.unwrap();
-            assert_eq!(command, "j/getoption animations:enabled");
-            stream
-                .write_all(br#"{"option":"animations:enabled","bool":false}"#)
-                .await
-                .unwrap();
-        });
-        let client = Client::new(root.path().into(), Some("preferences-test".into()));
+        let (_root, client, server) = command_server(
+            "j/getoption animations:enabled",
+            r#"{"option":"animations:enabled","bool":false}"#.into(),
+        )
+        .await;
         assert!(!client.preferences().await.unwrap().animations_enabled);
         server.await.unwrap();
     }

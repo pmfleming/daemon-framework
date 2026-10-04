@@ -1,29 +1,27 @@
 use std::{
-    collections::HashMap,
     future::Future,
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-use shelllist_daemon_core::IdSequence;
+use shelllist_daemon_core::{
+    IdSequence, OperationAdmissionError, OperationLimits, OwnedOperations,
+};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 struct OwnedTask {
-    owner: Option<String>,
     task: JoinHandle<()>,
     generation: Arc<()>,
 }
 
-#[derive(Default)]
 struct State {
     closed: bool,
-    tasks: HashMap<String, OwnedTask>,
+    tasks: OwnedOperations<OwnedTask>,
 }
 
 /// One registry belongs to one serving D-Bus connection. No global bus state.
 pub struct OwnedTaskRegistry {
     ids: IdSequence,
     state: Arc<Mutex<State>>,
-    limits: TaskLimits,
     owners: OnceLock<crate::OwnerLossMonitor>,
 }
 
@@ -59,6 +57,15 @@ impl std::fmt::Display for TaskAdmissionError {
 }
 impl std::error::Error for TaskAdmissionError {}
 
+impl From<OperationAdmissionError> for TaskAdmissionError {
+    fn from(error: OperationAdmissionError) -> Self {
+        match error {
+            OperationAdmissionError::Full => Self::Full,
+            OperationAdmissionError::DuplicateId => Self::DuplicateId,
+        }
+    }
+}
+
 struct Registration {
     state: Weak<Mutex<State>>,
     id: String,
@@ -70,10 +77,10 @@ impl Drop for Registration {
             let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
             if state
                 .tasks
-                .get(&self.id)
+                .get_mut(&self.id)
                 .is_some_and(|task| Arc::ptr_eq(&task.generation, &self.generation))
             {
-                state.tasks.remove(&self.id);
+                state.tasks.claim(&self.id);
             }
         }
     }
@@ -89,8 +96,13 @@ impl OwnedTaskRegistry {
     pub fn with_limits(first_id: u64, limits: TaskLimits) -> Self {
         Self {
             ids: IdSequence::new(first_id),
-            state: Arc::new(Mutex::new(State::default())),
-            limits,
+            state: Arc::new(Mutex::new(State {
+                closed: false,
+                tasks: OwnedOperations::new(OperationLimits {
+                    total: limits.total,
+                    per_owner: limits.per_owner,
+                }),
+            })),
             owners: OnceLock::new(),
         }
     }
@@ -141,41 +153,23 @@ impl OwnedTaskRegistry {
         if state.closed {
             return Err(TaskAdmissionError::Closed);
         }
-        if state.tasks.contains_key(&id) {
-            return Err(TaskAdmissionError::DuplicateId);
-        }
-        if state.tasks.len() >= self.limits.total
-            || state
-                .tasks
-                .values()
-                .filter(|task| task.owner == owner)
-                .count()
-                >= self.limits.per_owner
-        {
-            return Err(TaskAdmissionError::Full);
-        }
-        let generation = Arc::new(());
-        let registration = Registration {
-            state: Arc::downgrade(&self.state),
-            id: id.clone(),
-            generation: generation.clone(),
-        };
         let (start, ready) = oneshot::channel();
-        let task = crate::spawn_named("owned-task", async move {
-            let _registration = registration;
-            if ready.await.is_err() {
-                return;
-            }
-            tokio::select! { biased; () = stop => {}, () = events => {} }
-        });
-        state.tasks.insert(
-            id,
-            OwnedTask {
-                owner,
-                task,
-                generation,
-            },
-        );
+        state.tasks.insert_with(id, owner, |id| {
+            let generation = Arc::new(());
+            let registration = Registration {
+                state: Arc::downgrade(&self.state),
+                id: id.to_owned(),
+                generation: generation.clone(),
+            };
+            let task = crate::spawn_named("owned-task", async move {
+                let _registration = registration;
+                if ready.await.is_err() {
+                    return;
+                }
+                tokio::select! { biased; () = stop => {}, () = events => {} }
+            });
+            OwnedTask { task, generation }
+        })?;
         drop(state);
         let _ = start.send(());
         Ok(())
@@ -183,19 +177,10 @@ impl OwnedTaskRegistry {
 
     pub async fn cancel_owned(&self, id: &str, owner: Option<&str>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state
-            .tasks
-            .get(id)
-            .is_none_or(|task| task.owner.as_deref() != owner)
-        {
-            return false;
-        }
-        if let Some(task) = state.tasks.remove(id) {
-            task.task.abort();
+        state.tasks.claim_owned(id, owner).is_some_and(|task| {
+            task.value.task.abort();
             true
-        } else {
-            false
-        }
+        })
     }
 
     /// Closes admission before aborting and joining every registered worker.
@@ -206,7 +191,7 @@ impl OwnedTaskRegistry {
             state
                 .tasks
                 .drain()
-                .map(|(_, task)| task.task)
+                .map(|task| task.value.task)
                 .collect::<Vec<_>>()
         };
         for task in &tasks {
@@ -225,14 +210,14 @@ impl Default for OwnedTaskRegistry {
 }
 impl Drop for OwnedTaskRegistry {
     fn drop(&mut self) {
-        for task in self
+        for (_, task) in self
             .state
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .tasks
-            .values()
+            .iter()
         {
-            task.task.abort();
+            task.value.task.abort();
         }
     }
 }
@@ -254,10 +239,15 @@ mod tests {
         registry
             .spawn_until("one".into(), Some("a".into()), pending(), pending())
             .unwrap();
-        assert_eq!(
-            registry.spawn_until("two".into(), Some("a".into()), pending(), pending()),
-            Err(TaskAdmissionError::Full)
-        );
+        for (id, error) in [
+            ("one", TaskAdmissionError::DuplicateId),
+            ("two", TaskAdmissionError::Full),
+        ] {
+            assert_eq!(
+                registry.spawn_until(id.into(), Some("a".into()), pending(), pending()),
+                Err(error)
+            );
+        }
         registry
             .spawn_until("two".into(), Some("b".into()), pending(), pending())
             .unwrap();
@@ -292,7 +282,7 @@ mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
-        assert!(registry.state.lock().unwrap().tasks.is_empty());
+        assert_eq!(registry.state.lock().unwrap().tasks.iter().count(), 0);
     }
 
     #[tokio::test]

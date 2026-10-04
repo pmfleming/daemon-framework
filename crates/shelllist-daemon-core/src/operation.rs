@@ -63,10 +63,20 @@ impl<T> OwnedOperations<T> {
         owner: Option<String>,
         value: T,
     ) -> Result<(), OperationAdmissionError> {
+        self.insert_with(id, owner, |_| value)
+    }
+    /// Constructs a value only after admission succeeds, under the caller's lock.
+    pub fn insert_with(
+        &mut self,
+        id: String,
+        owner: Option<String>,
+        create: impl FnOnce(&str) -> T,
+    ) -> Result<(), OperationAdmissionError> {
         if self.active.contains_key(&id) {
             return Err(OperationAdmissionError::DuplicateId);
         }
         self.admit(owner.as_deref())?;
+        let value = create(&id);
         self.active.insert(id, OwnedOperation { owner, value });
         Ok(())
     }
@@ -163,7 +173,23 @@ mod tests {
             total: 2,
             per_owner: 1,
         });
-        active.insert("one".into(), Some("a".into()), 1).unwrap();
+        active
+            .insert_with("one".into(), Some("a".into()), |id| {
+                assert_eq!(id, "one");
+                1
+            })
+            .unwrap();
+        for (id, error) in [
+            ("one", OperationAdmissionError::DuplicateId),
+            ("two", OperationAdmissionError::Full),
+        ] {
+            assert_eq!(
+                active.insert_with(id.into(), Some("a".into()), |_| panic!(
+                    "rejected factory ran"
+                )),
+                Err(error)
+            );
+        }
         assert_eq!(active.admit(Some("a")), Err(OperationAdmissionError::Full));
         active.insert("two".into(), Some("b".into()), 2).unwrap();
         assert_eq!(active.admit(Some("c")), Err(OperationAdmissionError::Full));

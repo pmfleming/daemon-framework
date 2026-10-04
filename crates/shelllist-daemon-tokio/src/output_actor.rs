@@ -154,8 +154,12 @@ impl<P: CorrelationPolicy> OutputState<P> {
         }
     }
 
-    fn activate(&mut self, response: &Value, route: Option<&ClientRoute>) -> Vec<(String, Value)> {
-        let Some(tracked) = self.policy.response_id(response) else {
+    fn activate(
+        &mut self,
+        tracked: Option<TrackedId>,
+        route: Option<ClientRoute>,
+    ) -> Vec<(String, Value)> {
+        let Some(tracked) = tracked else {
             return Vec::new();
         };
         if self.suppressed_ids.contains(&tracked.id) {
@@ -165,7 +169,7 @@ impl<P: CorrelationPolicy> OutputState<P> {
         let active_route = self.active_ids.entry(tracked.id).or_default();
         // A repeated response must not discard an already acknowledged route.
         if let Some(route) = route.filter(|_| tracked.kind == TrackedKind::Subscription) {
-            *active_route = Some(route.clone());
+            *active_route = Some(route);
         }
         pending
     }
@@ -341,17 +345,7 @@ where
             result,
             cancelled_request_id,
             route,
-        } => {
-            emit_response(
-                writer,
-                state,
-                id,
-                result,
-                cancelled_request_id,
-                route.as_ref(),
-            )
-            .await
-        }
+        } => emit_response(writer, state, id, result, cancelled_request_id, route).await,
         OutputCommand::ActiveIds { route, reply } => {
             let ids = route
                 .as_ref()
@@ -384,7 +378,7 @@ async fn emit_response<P, W>(
     id: String,
     result: std::result::Result<Value, String>,
     cancelled_request_id: Option<String>,
-    route: Option<&ClientRoute>,
+    route: Option<ClientRoute>,
 ) -> Result<()>
 where
     P: CorrelationPolicy,
@@ -393,14 +387,16 @@ where
     if let Some(cancelled) = cancelled_request_id {
         state.cancelled(cancelled);
     }
-    let (line, pending) = match result {
+    let (line, tracked) = match result {
         Ok(response) => {
-            let pending = state.activate(&response, route);
-            (response_message(&id, response), pending)
+            let tracked = state.policy.response_id(&response);
+            (response_message(&id, response), tracked)
         }
-        Err(error) => (response_error_message(&id, error), Vec::new()),
+        Err(error) => (response_error_message(&id, error), None),
     };
-    emit_line(writer, &addressed_message(line, route)).await?;
+    let line = addressed_message(line, route.as_ref());
+    let pending = state.activate(tracked, route);
+    emit_line(writer, &line).await?;
     for (stream, event) in pending {
         let message = state.event_message(&stream, event);
         emit_line(writer, &message).await?;

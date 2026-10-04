@@ -211,7 +211,7 @@ pub fn read_bytes_bounded(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         AtomicFilePolicy, StagedFile, TEMP_SEQUENCE, parent_directory, read_bytes_bounded,
         write_bytes_atomic,
@@ -222,9 +222,9 @@ mod tests {
         path::{Path, PathBuf},
         sync::atomic::Ordering,
     };
-    struct Directory(PathBuf);
+    pub(crate) struct Directory(pub PathBuf);
     impl Directory {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "framework-files-{}-{}",
                 std::process::id(),

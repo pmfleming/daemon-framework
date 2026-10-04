@@ -1,15 +1,9 @@
+use serde::{Serialize, de::DeserializeOwned};
 use std::env;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::AtomicU64;
-
-use serde::{Serialize, de::DeserializeOwned};
-
-#[cfg(test)]
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XdgRoot {
@@ -90,11 +84,9 @@ fn xdg_home(variable: &str, fallback: &str) -> Option<PathBuf> {
 }
 
 fn absolute_env(name: &str) -> Option<PathBuf> {
-    absolute_path(env::var_os(name).map(PathBuf::from))
-}
-
-fn absolute_path(path: Option<PathBuf>) -> Option<PathBuf> {
-    path.filter(|path| path.is_absolute())
+    env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 /// Resolves a path below one application's XDG directory.
@@ -157,15 +149,14 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use crate::file::tests::Directory;
     use std::collections::BTreeMap;
-    use std::fs;
     use std::io;
     use std::path::Path;
-    use std::sync::atomic::Ordering;
 
     use super::{
-        AtomicWritePolicy, TEMP_SEQUENCE, is_safe_relative_path, is_single_normal_component,
-        read_json, write_json_atomic,
+        AtomicWritePolicy, is_safe_relative_path, is_single_normal_component, read_json,
+        write_json_atomic,
     };
 
     #[test]
@@ -189,31 +180,20 @@ mod tests {
 
     #[test]
     fn private_atomic_json_replaces_complete_files() -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "daemon-framework-state-test-{}-{}",
-            std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let path = root.join("state.json");
-        write_json_atomic(
-            &path,
-            &BTreeMap::from([("one", 1)]),
-            AtomicWritePolicy::PRIVATE,
-        )?;
-        write_json_atomic(
-            &path,
-            &BTreeMap::from([("two", 2)]),
-            AtomicWritePolicy::PRIVATE,
-        )?;
+        let root = Directory::new();
+        let path = root.0.join("state.json");
+        for entry in [("one", 1), ("two", 2)] {
+            write_json_atomic(&path, &BTreeMap::from([entry]), AtomicWritePolicy::PRIVATE)?;
+        }
         let value = read_json::<BTreeMap<String, i32>>(&path)?
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "state was not written"))?;
         assert_eq!(value, BTreeMap::from([("two".into(), 2)]));
         let temporary_exists = root
+            .0
             .read_dir()?
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!temporary_exists);
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

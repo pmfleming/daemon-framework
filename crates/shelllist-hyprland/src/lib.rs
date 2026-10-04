@@ -86,14 +86,12 @@ impl Client {
 
     async fn instance_dir(&self, required_socket: &str) -> Result<PathBuf> {
         for root in self.roots() {
-            if let Some(signature) = &self.signature {
-                let preferred = root.join(signature);
-                if fs::try_exists(preferred.join(required_socket))
+            if let Some(signature) = &self.signature
+                && fs::try_exists(root.join(signature).join(required_socket))
                     .await
                     .unwrap_or(false)
-                {
-                    return Ok(preferred);
-                }
+            {
+                return Ok(root.join(signature));
             }
             let Ok(mut entries) = fs::read_dir(&root).await else {
                 continue;
@@ -144,32 +142,32 @@ async fn watch_events_with<T, F>(client: Client, sender: mpsc::Sender<T>, map: F
 where
     F: Fn(Event) -> T,
 {
-    while !sender.is_closed() {
-        if let Ok(stream) = client.event_socket().await {
-            if sender.send(map(Event::Connected)).await.is_err() {
+    let watch = async {
+        loop {
+            if let Ok(stream) = client.event_socket().await
+                && forward_events(stream, &sender, &map).await.is_err()
+            {
                 return;
             }
-            let mut lines = BufReader::new(stream).lines();
-            loop {
-                tokio::select! {
-                    _ = sender.closed() => return,
-                    line = lines.next_line() => match line {
-                        Ok(Some(line)) => if sender.send(map(Event::Message(line))).await.is_err() { return; },
-                        _ => break,
-                    }
-                }
-            }
-            if sender.send(map(Event::Disconnected)).await.is_err() {
-                return;
-            }
+            // Back off even when a socket accepts and immediately closes.
+            time::sleep(RECONNECT_DELAY).await;
         }
-        // Bound reconnect attempts even if a socket accepts and immediately
-        // closes (the old EOF path could spin without any delay).
-        tokio::select! {
-            _ = sender.closed() => return,
-            _ = time::sleep(RECONNECT_DELAY) => {},
-        }
+    };
+    // Receiver closure cancels connection attempts, reads, sends and backoff.
+    tokio::select! { _ = sender.closed() => {}, _ = watch => {} }
+}
+
+async fn forward_events<T>(
+    stream: UnixStream,
+    sender: &mpsc::Sender<T>,
+    map: &impl Fn(Event) -> T,
+) -> Result<(), mpsc::error::SendError<T>> {
+    sender.send(map(Event::Connected)).await?;
+    let mut lines = BufReader::new(stream).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        sender.send(map(Event::Message(line))).await?;
     }
+    sender.send(map(Event::Disconnected)).await
 }
 
 async fn request_socket(path: &std::path::Path, command: &str) -> Result<String> {
@@ -198,6 +196,7 @@ fn default_runtime_dir() -> PathBuf {
 
 fn valid_signature(value: &str) -> bool {
     !value.is_empty()
+        && !matches!(value, "." | "..")
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "_-.".contains(character))
@@ -214,32 +213,41 @@ mod tests {
         time,
     };
 
-    #[tokio::test]
-    async fn request_uses_bounded_socket_protocol_without_a_process() {
+    async fn socket_fixture(socket: &str) -> (tempfile::TempDir, Client, tokio::net::UnixListener) {
         let root = tempfile::tempdir().unwrap();
         let instance = root.path().join("hypr/test");
         fs::create_dir_all(&instance).await.unwrap();
-        let listener = tokio::net::UnixListener::bind(instance.join(COMMAND_SOCKET)).unwrap();
+        let listener = tokio::net::UnixListener::bind(instance.join(socket)).unwrap();
+        let client = Client::new(root.path().into(), Some("test".into()));
+        (root, client, listener)
+    }
+
+    pub(crate) async fn command_server(
+        expected: &'static str,
+        reply: String,
+    ) -> (tempfile::TempDir, Client, tokio::task::JoinHandle<()>) {
+        let (root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut command = String::new();
             stream.read_to_string(&mut command).await.unwrap();
-            assert_eq!(command, "j/clients");
-            stream.write_all(b"[]").await.unwrap();
+            assert_eq!(command, expected);
+            stream.write_all(reply.as_bytes()).await.unwrap();
         });
-        let client = Client::new(root.path().into(), Some("test".into()));
+        (root, client, server)
+    }
+
+    #[tokio::test]
+    async fn request_uses_bounded_socket_protocol_without_a_process() {
+        let (_root, client, server) = command_server("j/clients", "[]".into()).await;
         assert_eq!(client.request("j/clients").await.unwrap(), "[]");
         server.await.unwrap();
     }
 
     #[tokio::test]
     async fn event_stream_reports_reconnects_and_backs_off_after_eof() {
-        let root = tempfile::tempdir().unwrap();
-        let instance = root.path().join("hypr/test");
-        fs::create_dir_all(&instance).await.unwrap();
-        let listener = tokio::net::UnixListener::bind(instance.join(EVENT_SOCKET)).unwrap();
+        let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
         let (sender, mut events) = mpsc::channel(8);
-        let client = Client::new(root.path().into(), Some("test".into()));
         let task = tokio::spawn(watch_events_with(client, sender, |event| event));
         let (mut stream, _) = listener.accept().await.unwrap();
         assert_eq!(events.recv().await.unwrap(), Event::Connected);
@@ -273,8 +281,8 @@ mod tests {
     #[test]
     fn rejects_signatures_that_can_escape_the_runtime_root() {
         assert!(valid_signature("instance_123.456"));
-        assert!(!valid_signature("../other"));
-        assert!(!valid_signature("nested/instance"));
-        assert!(!valid_signature(""));
+        for invalid in ["", ".", "..", "../other", "nested/instance"] {
+            assert!(!valid_signature(invalid), "{invalid}");
+        }
     }
 }

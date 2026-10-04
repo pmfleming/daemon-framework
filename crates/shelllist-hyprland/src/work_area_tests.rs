@@ -23,6 +23,10 @@ fn text(parts: &[Value; 5]) -> String {
 fn margins(parts: &[Value; 5], monitor: &str) -> Value {
     serde_json::to_value(parse_work_areas(&text(parts)).unwrap().get(monitor)).unwrap()
 }
+fn assert_rule(parts: &mut [Value; 5], selector: &str, monitor: &str, top: f64) {
+    parts[2] = json!([{"workspaceString":selector,"gapsOut":[0]}]);
+    assert_eq!(margins(parts, monitor)["top"], top, "{selector}");
+}
 #[test]
 fn logical_reservations_css_gaps_and_ordered_rules() {
     let mut parts = fixture();
@@ -30,14 +34,14 @@ fn logical_reservations_css_gaps_and_ordered_rules() {
         margins(&parts, "eDP-1"),
         json!({"left":2.0,"top":53.0,"right":2.0,"bottom":2.0})
     );
-    parts[2] = json!([{"workspaceString":"r[1-4]","gapsOut":[9,10,11,12]},{"workspaceString":"1","gapsOut":[3,4,5,6]},{"workspaceString":"1","borderSize":10}]);
+    parts[2] = json!([{"workspaceString":"r[1-4]","gapsOut":[9,10,11,12]},{"workspaceString":"1","gapsOut":[3,4,5,6]},{"workspaceString":"1","borderSize":10},{"workspaceString":"1","gapsOut":"invalid"},{"workspaceString":"3","gapsOut":[7]}]);
     assert_eq!(
         margins(&parts, "eDP-1"),
         json!({"left":6.0,"top":54.0,"right":4.0,"bottom":5.0})
     );
     assert_eq!(
         margins(&parts, "DP-1"),
-        json!({"left":36.0,"top":89.0,"right":20.0,"bottom":31.0})
+        json!({"left":31.0,"top":87.0,"right":17.0,"bottom":27.0})
     );
     parts[2] = json!([]);
     parts[4]["css"] = json!("4 8 12 16");
@@ -56,9 +60,9 @@ fn smart_gaps_and_group_visibility_filters() {
         "w[tg1]",
         "w[f1]",
         "r[1-4] m[current] w[2] f[-1]",
+        "  r[1-4]m[current]\t w[2] f[-1]  ",
     ] {
-        parts[2] = json!([{"workspaceString":selector,"gapsOut":[0,0,0,0]}]);
-        assert_eq!(margins(&parts, "eDP-1")["top"], 51.0, "{selector}");
+        assert_rule(&mut parts, selector, "eDP-1", 51.0);
     }
     parts[2] = json!([{"workspaceString":"w[t1]","gapsOut":[0,0,0,0]}]);
     parts[3][1]["floating"] = json!(false);
@@ -70,17 +74,14 @@ fn smart_gaps_and_group_visibility_filters() {
     parts[3][1]["pinned"] = json!(true);
     parts[3][1]["visible"] = json!(false);
     for selector in ["w[p1]", "w[fv0]", "w[tf0]"] {
-        parts[2] = json!([{"workspaceString":selector,"gapsOut":[0,0,0,0]}]);
-        assert_eq!(margins(&parts, "eDP-1")["top"], 51.0);
+        assert_rule(&mut parts, selector, "eDP-1", 51.0);
     }
     parts[3][0]["fullscreen"] = json!(2);
     for (selector, top) in [("f[0]", 51.0), ("f[1]", 53.0), ("f[other]", 51.0)] {
-        parts[2] = json!([{"workspaceString":selector,"gapsOut":[0,0,0,0]}]);
-        assert_eq!(margins(&parts, "eDP-1")["top"], top, "{selector}");
+        assert_rule(&mut parts, selector, "eDP-1", top);
     }
     parts[3][0]["workspace"]["id"] = json!(3);
-    parts[2] = json!([{"workspaceString":"f[0]","gapsOut":[0,0,0,0]}]);
-    assert_eq!(margins(&parts, "eDP-1")["top"], 53.0);
+    assert_rule(&mut parts, "f[0]", "eDP-1", 53.0);
 }
 #[test]
 fn named_special_monitor_and_malformed_selectors() {
@@ -93,17 +94,23 @@ fn named_special_monitor_and_malformed_selectors() {
         "m[1]",
         "m[desc:Acme Panel]",
     ] {
-        parts[2] = json!([{"workspaceString":selector,"gapsOut":[0,0,0,0]}]);
-        assert_eq!(margins(&parts, "DP-1")["top"], 80.0, "{selector}");
+        assert_rule(&mut parts, selector, "DP-1", 80.0);
     }
     parts[2] = json!([{"workspaceString":"m[r]","gapsOut":[0,0,0,0]}]);
     parts[0][1]["x"] = json!(1538);
     assert_eq!(margins(&parts, "DP-1")["top"], 82.0);
     parts[0][1]["x"] = json!(1537);
     assert_eq!(margins(&parts, "DP-1")["top"], 80.0);
-    for selector in ["r[1-4] junk", "w[bad]", "n[true]", "m[right]"] {
-        parts[2] = json!([{"workspaceString":selector,"gapsOut":[0,0,0,0]}]);
-        assert_eq!(margins(&parts, "eDP-1")["top"], 53.0);
+    for selector in [
+        "r[1-4] junk",
+        "w[bad]",
+        "n[true]",
+        "m[right]",
+        "m[current]]",
+        "m[current]w[2",
+        "mm[current]",
+    ] {
+        assert_rule(&mut parts, selector, "eDP-1", 53.0);
     }
     parts[1]
         .as_array_mut()
@@ -117,9 +124,24 @@ fn named_special_monitor_and_malformed_selectors() {
         .unwrap()
         .push(json!({"id":-99,"name":"special:notes"}));
     parts[0][0]["specialWorkspace"] = json!({"id":-99});
-    parts[2] = json!([{"workspaceString":"s[true]","gapsOut":[0,0,0,0]}]);
-    assert_eq!(margins(&parts, "eDP-1")["top"], 51.0);
+    assert_rule(&mut parts, "s[true]", "eDP-1", 51.0);
 }
+#[test]
+fn directional_selection_keeps_first_tie_and_skips_disabled_monitors() {
+    let mut parts = fixture();
+    let mut other = parts[0][1].clone();
+    other["name"] = json!("DP-2");
+    other["id"] = json!(2);
+    parts[0].as_array_mut().unwrap().push(other);
+    parts[2] = json!([{"workspaceString":"m[r]","gapsOut":[0]}]);
+    assert_eq!(margins(&parts, "DP-1")["top"], 80.0);
+    assert_eq!(margins(&parts, "DP-2")["top"], 82.0);
+    parts[0][1]["disabled"] = json!(true);
+    assert_eq!(margins(&parts, "DP-2")["top"], 80.0);
+    parts[0][0]["focused"] = json!(false);
+    assert_eq!(margins(&parts, "DP-2")["top"], 82.0);
+}
+
 #[tokio::test]
 #[ignore = "requires a running Hyprland session; read-only probe"]
 async fn live_work_areas() {
@@ -134,22 +156,11 @@ async fn live_work_areas() {
 
 #[tokio::test]
 async fn native_batch_request_returns_normalized_work_areas() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let root = tempfile::tempdir().unwrap();
-    let instance = root.path().join("hypr/test");
-    tokio::fs::create_dir_all(&instance).await.unwrap();
-    let listener = tokio::net::UnixListener::bind(instance.join(".socket.sock")).unwrap();
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut command = String::new();
-        stream.read_to_string(&mut command).await.unwrap();
-        assert_eq!(
-            command,
-            "[[BATCH]]j/monitors;j/workspaces;j/workspacerules;j/clients;j/getoption general:gaps_out"
-        );
-        stream.write_all(text(&fixture()).as_bytes()).await.unwrap();
-    });
-    let client = crate::Client::new(root.path().into(), Some("test".into()));
+    let (_root, client, server) = crate::tests::command_server(
+        "[[BATCH]]j/monitors;j/workspaces;j/workspacerules;j/clients;j/getoption general:gaps_out",
+        text(&fixture()),
+    )
+    .await;
     assert_eq!(client.work_areas().await.unwrap()["eDP-1"].top, 53.0);
     server.await.unwrap();
 }

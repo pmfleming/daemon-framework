@@ -151,34 +151,31 @@ fn monitor_box(m: &Monitor) -> [f64; 4] {
 fn directional<'a>(direction: &str, monitors: &'a [Monitor]) -> Option<&'a Monitor> {
     let focused = monitors.iter().find(|m| m.focused)?;
     let [x, y, w, h] = monitor_box(focused);
-    let mut best = None;
-    let mut intersection = -1.0_f64;
-    for monitor in monitors
+    monitors
         .iter()
         .filter(|m| m.name != focused.name && !m.disabled)
-    {
-        let [tx, ty, tw, th] = monitor_box(monitor);
-        let distance = match direction {
-            "l" => x - tx - tw,
-            "r" => x + w - tx,
-            "u" | "t" => y - ty - th,
-            _ => y + h - ty,
-        };
-        if distance.abs() >= 2.0 {
-            continue;
-        }
-        let overlap = if matches!(direction, "l" | "r") {
-            (y + h).min(ty + th) - y.max(ty)
-        } else {
-            (x + w).min(tx + tw) - x.max(tx)
-        }
-        .max(0.0);
-        if overlap > intersection {
-            best = Some(monitor);
-            intersection = overlap;
-        }
-    }
-    best
+        .filter_map(|monitor| {
+            let [tx, ty, tw, th] = monitor_box(monitor);
+            let distance = match direction {
+                "l" => x - tx - tw,
+                "r" => x + w - tx,
+                "u" | "t" => y - ty - th,
+                _ => y + h - ty,
+            };
+            if distance.abs() >= 2.0 {
+                return None;
+            }
+            let overlap = if matches!(direction, "l" | "r") {
+                (y + h).min(ty + th) - y.max(ty)
+            } else {
+                (x + w).min(tx + tw) - x.max(tx)
+            }
+            .max(0.0);
+            Some((monitor, overlap))
+        })
+        // min_by retains the first equal candidate, unlike max_by.
+        .min_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(monitor, _)| monitor)
 }
 fn monitor_matches(selector: &str, monitor: &Monitor, monitors: &[Monitor]) -> bool {
     if selector == "current" {
@@ -295,7 +292,7 @@ fn fullscreen_matches(value: &str, workspace: &Workspace, clients: &[Window]) ->
         .any(|c| c.on(workspace) && c.fullscreen == mode)
 }
 fn matches(selector: &str, workspace: &Workspace, monitor: &Monitor, snapshot: &Snapshot) -> bool {
-    let mut rest = selector.trim();
+    let rest = selector.trim();
     if rest.is_empty() {
         return true;
     }
@@ -308,22 +305,18 @@ fn matches(selector: &str, workspace: &Workspace, monitor: &Monitor, snapshot: &
     if rest.starts_with("special") {
         return workspace.name == rest;
     }
-    while !rest.is_empty() {
-        let Some((clause, tail)) = rest.split_once(']') else {
-            return false;
-        };
-        let Some((kind, value)) = clause.split_once('[') else {
+    let Some(clauses) = rest.strip_suffix(']') else {
+        return false;
+    };
+    clauses.split(']').all(|clause| {
+        let Some((kind, value)) = clause.trim_start().split_once('[') else {
             return false;
         };
         let [kind] = kind.as_bytes() else {
             return false;
         };
-        if !term(char::from(*kind), value, workspace, monitor, snapshot) {
-            return false;
-        }
-        rest = tail.trim_start();
-    }
-    true
+        term(char::from(*kind), value, workspace, monitor, snapshot)
+    })
 }
 fn insets(snapshot: &Snapshot) -> BTreeMap<String, Insets> {
     snapshot
@@ -341,14 +334,15 @@ fn insets(snapshot: &Snapshot) -> BTreeMap<String, Insets> {
                 monitor.active.id
             };
             let workspace = snapshot.workspaces.iter().find(|w| w.id == active)?;
-            let mut gaps = snapshot.gaps;
-            for rule in &snapshot.rules {
-                if let Some(value) = &rule.gaps
-                    && matches(&rule.selector, workspace, monitor, snapshot)
-                {
-                    gaps = css(value).unwrap_or(gaps);
-                }
-            }
+            let gaps = snapshot
+                .rules
+                .iter()
+                .rev()
+                .find_map(|rule| {
+                    let gaps = css(rule.gaps.as_ref()?)?;
+                    matches(&rule.selector, workspace, monitor, snapshot).then_some(gaps)
+                })
+                .unwrap_or(snapshot.gaps);
             Some((
                 monitor.name.clone(),
                 Insets {
