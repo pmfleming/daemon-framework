@@ -28,6 +28,11 @@ workspace CI and Shelllist's `frameworkWorkspace` check include these tests.
 
 ## API and ownership
 
+Discovery prefers the requested instance across the runtime and legacy roots,
+then tries other socket candidates in sorted runtime-root / legacy-root order.
+Stale sockets that refuse connections are skipped. Commands are never replayed
+on another instance after a connection succeeds.
+
 `Client::request` uses the command socket directly with a two-second deadline. `watch_events_detailed` reports Connected, Disconnected, and raw Message events so consumers can filter domain changes and adapt fallback polling. Reconnection is delayed by one second, including accept-then-EOF failures; closing the receiver stops the watcher. The original unit-valued `watch_events` API remains available.
 
 `Client::work_areas` uses one native JSON batch and resolves workspace rules into

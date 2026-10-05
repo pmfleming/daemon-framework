@@ -3,7 +3,12 @@ pub mod work_area;
 #[cfg(test)]
 mod work_area_tests;
 
-use std::{env, os::unix::fs::MetadataExt, path::PathBuf, time::Duration};
+use std::{
+    env,
+    os::unix::fs::{FileTypeExt, MetadataExt},
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use tokio::{
@@ -49,13 +54,16 @@ impl Client {
     }
 
     pub async fn request(&self, command: &str) -> Result<String> {
-        let socket = self
-            .instance_dir(COMMAND_SOCKET)
-            .await?
-            .join(COMMAND_SOCKET);
-        time::timeout(IPC_TIMEOUT, request_socket(&socket, command))
-            .await
-            .context("Hyprland command timed out")?
+        let candidates =
+            socket_candidates(&self.roots(), self.signature.as_deref(), COMMAND_SOCKET).await?;
+        time::timeout(IPC_TIMEOUT, async {
+            let stream = connect_candidates(&candidates).await?;
+            // Fail over only while connecting, never replay a command that may
+            // already have changed compositor state.
+            request_socket(stream, command).await
+        })
+        .await
+        .context("Hyprland command timed out")?
     }
 
     pub async fn work_areas(
@@ -71,47 +79,11 @@ impl Client {
     }
 
     pub async fn event_socket(&self) -> Result<UnixStream> {
-        let socket = self.instance_dir(EVENT_SOCKET).await?.join(EVENT_SOCKET);
-        time::timeout(IPC_TIMEOUT, UnixStream::connect(&socket))
+        let candidates =
+            socket_candidates(&self.roots(), self.signature.as_deref(), EVENT_SOCKET).await?;
+        time::timeout(IPC_TIMEOUT, connect_candidates(&candidates))
             .await
             .context("Hyprland event connection timed out")?
-            .with_context(|| format!("connect to Hyprland event socket {}", socket.display()))
-    }
-
-    async fn instance_dir(&self, required_socket: &str) -> Result<PathBuf> {
-        for root in self.roots() {
-            if let Some(path) = self.find_instance(&root, required_socket).await? {
-                return Ok(path);
-            }
-        }
-        bail!("no active Hyprland IPC instance is available")
-    }
-
-    async fn find_instance(
-        &self,
-        root: &std::path::Path,
-        required_socket: &str,
-    ) -> Result<Option<PathBuf>> {
-        if let Some(signature) = &self.signature
-            && fs::try_exists(root.join(signature).join(required_socket))
-                .await
-                .unwrap_or(false)
-        {
-            return Ok(Some(root.join(signature)));
-        }
-        let Ok(mut entries) = fs::read_dir(root).await else {
-            return Ok(None);
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if fs::try_exists(path.join(required_socket))
-                .await
-                .unwrap_or(false)
-            {
-                return Ok(Some(path));
-            }
-        }
-        Ok(None)
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -122,6 +94,64 @@ impl Client {
         } else {
             vec![runtime, temporary]
         }
+    }
+}
+
+// Prefer the requested instance in either root, then sorted fallback instances
+// in runtime-root / legacy-root order. Socket existence alone is not liveness.
+async fn socket_candidates(
+    roots: &[PathBuf],
+    signature: Option<&str>,
+    socket: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut candidates = Vec::new();
+    if let Some(signature) = signature {
+        for root in roots {
+            add_socket(&mut candidates, root.join(signature).join(socket)).await;
+        }
+    }
+    for root in roots {
+        let Ok(mut entries) = fs::read_dir(root).await else {
+            continue;
+        };
+        let mut paths = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            paths.push(entry.path().join(socket));
+        }
+        paths.sort();
+        for path in paths {
+            add_socket(&mut candidates, path).await;
+        }
+    }
+    Ok(candidates)
+}
+
+async fn add_socket(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.contains(&path)
+        && fs::metadata(&path)
+            .await
+            .is_ok_and(|m| m.file_type().is_socket())
+    {
+        candidates.push(path);
+    }
+}
+
+async fn connect_candidates(candidates: &[PathBuf]) -> Result<UnixStream> {
+    let mut last_error = None;
+    for socket in candidates {
+        match UnixStream::connect(socket).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => {
+                last_error = Some(
+                    anyhow::Error::new(error)
+                        .context(format!("connect to Hyprland socket {}", socket.display())),
+                )
+            }
+        }
+    }
+    match last_error {
+        Some(error) => Err(error.context("no reachable Hyprland IPC instance is available")),
+        None => bail!("no active Hyprland IPC instance is available"),
     }
 }
 
@@ -175,10 +205,7 @@ async fn forward_events<T>(
     sender.send(map(Event::Disconnected)).await
 }
 
-async fn request_socket(path: &std::path::Path, command: &str) -> Result<String> {
-    let mut stream = UnixStream::connect(path)
-        .await
-        .with_context(|| format!("connect to Hyprland command socket {}", path.display()))?;
+async fn request_socket(mut stream: UnixStream, command: &str) -> Result<String> {
     stream.write_all(command.as_bytes()).await?;
     stream.shutdown().await?;
     let mut response = String::new();
@@ -209,7 +236,10 @@ fn valid_signature(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMAND_SOCKET, Client, EVENT_SOCKET, Event, valid_signature, watch_events_with};
+    use super::{
+        COMMAND_SOCKET, Client, EVENT_SOCKET, Event, connect_candidates, socket_candidates,
+        valid_signature, watch_events_with,
+    };
     use std::time::Duration;
     use tokio::{
         fs,
@@ -244,24 +274,87 @@ mod tests {
 
     #[tokio::test]
     async fn request_uses_bounded_socket_protocol_without_a_process() {
-        let (root, mut client, server) = command_server("j/clients", "[]".into()).await;
+        let (root, client, server) = command_server("j/clients", "[]".into()).await;
         assert_eq!(client.request("j/clients").await.unwrap(), "[]");
         server.await.unwrap();
         let root = root.path().join("hypr");
-        for signature in [None, Some("missing".into())] {
-            client.signature = signature;
+        for signature in [None, Some("missing")] {
             assert_eq!(
-                client.find_instance(&root, COMMAND_SOCKET).await.unwrap(),
-                Some(root.join("test"))
+                socket_candidates(std::slice::from_ref(&root), signature, COMMAND_SOCKET)
+                    .await
+                    .unwrap(),
+                [root.join("test").join(COMMAND_SOCKET)]
             );
             assert!(
-                client
-                    .find_instance(&root, EVENT_SOCKET)
+                socket_candidates(std::slice::from_ref(&root), signature, EVENT_SOCKET)
                     .await
                     .unwrap()
-                    .is_none()
+                    .is_empty()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn discovery_is_ordered_and_connect_skips_stale_sockets() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = [root.path().join("runtime"), root.path().join("legacy")];
+        for socket in [COMMAND_SOCKET, EVENT_SOCKET] {
+            let mut listeners = Vec::new();
+            for (base, name) in [(0, "z"), (0, "b"), (0, "preferred"), (1, "preferred")] {
+                let directory = roots[base].join(name);
+                fs::create_dir_all(&directory).await.unwrap();
+                listeners.push(tokio::net::UnixListener::bind(directory.join(socket)).unwrap());
+            }
+            let candidates = socket_candidates(&roots, Some("preferred"), socket)
+                .await
+                .unwrap();
+            assert_eq!(
+                candidates,
+                [
+                    roots[0].join("preferred").join(socket),
+                    roots[1].join("preferred").join(socket),
+                    roots[0].join("b").join(socket),
+                    roots[0].join("z").join(socket)
+                ]
+            );
+            drop(listeners.pop()); // stale preferred socket in legacy root
+            drop(listeners.pop()); // stale preferred socket in runtime root
+            let stream = connect_candidates(&candidates).await.unwrap();
+            let (_peer, _) = listeners[1].accept().await.unwrap(); // sorted fallback b, not z
+            drop(stream);
+            fs::create_dir_all(roots[0].join("file")).await.unwrap();
+            fs::write(roots[0].join("file").join(socket), b"not a socket")
+                .await
+                .unwrap();
+            assert_eq!(
+                socket_candidates(&roots, Some("preferred"), socket)
+                    .await
+                    .unwrap(),
+                candidates
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn command_errors_after_connect_do_not_replay_on_another_instance() {
+        let (root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
+        let fallback = root.path().join("hypr/fallback");
+        fs::create_dir_all(&fallback).await.unwrap();
+        let fallback = tokio::net::UnixListener::bind(fallback.join(COMMAND_SOCKET)).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut command = String::new();
+            stream.read_to_string(&mut command).await.unwrap();
+            assert_eq!(command, "dispatch test");
+            stream.write_all(&[0xff]).await.unwrap(); // invalid reply after command execution
+        });
+        assert!(client.request("dispatch test").await.is_err());
+        server.await.unwrap();
+        assert!(
+            time::timeout(Duration::from_millis(50), fallback.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
