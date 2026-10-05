@@ -529,6 +529,75 @@ fn graph_cycles_collisions_and_existing_destinations_fail_closed() {
 }
 
 #[test]
+fn preflight_aggregates_worktrees_ignores_follows_and_does_not_write() {
+    let repos = Repositories::new();
+    let root = repos.repository(
+        "root",
+        json!({
+            "sibling": {"url": "git+file:../sibling"},
+            "again": {"url": "git+file:../sibling"},
+            "followed": {"follows": "sibling", "url": "git+file:../missing"}
+        }),
+        &[],
+    );
+    let sibling = repos.repository("sibling", json!({}), &[(".gitignore", "ignored/\n")]);
+    fs::create_dir(sibling.join("ignored")).unwrap();
+    fs::write(sibling.join("ignored/output"), "ignored").unwrap();
+    fs::write(sibling.join("image.png"), "untracked").unwrap();
+    fs::write(root.join("forgotten.nix"), "untracked").unwrap();
+    let mut nix = TestNix::default();
+    let error = format!(
+        "{:#}",
+        crate::preflight::preflight(&mut nix, &root).unwrap_err()
+    );
+    assert!(
+        error.contains("forgotten.nix") && error.contains("image.png"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("ignored/output") && !error.contains("missing"),
+        "{error}"
+    );
+    assert_eq!(nix.reads.len(), 2);
+    assert!(nix.locks.is_empty() && nix.stores.is_empty());
+    assert!(root.join("forgotten.nix").exists() && sibling.join("image.png").exists());
+    fs::remove_file(root.join("forgotten.nix")).unwrap();
+    fs::remove_file(sibling.join("image.png")).unwrap();
+    let report = crate::preflight::preflight(&mut nix, &root).unwrap();
+    assert_eq!(report.repositories.len(), 2);
+}
+
+#[test]
+fn preflight_walks_distinct_overlays_and_rejects_cycles() {
+    let repos = Repositories::new();
+    let root = repos.repository(
+        "root",
+        json!({
+            "a": {"url": "git+file:../sibling", "inputs": {"child": {"follows": "a"}}},
+            "b": {"url": "git+file:../sibling"}
+        }),
+        &[],
+    );
+    repos.repository(
+        "sibling",
+        json!({"child": {"url": "git+file:../child"}}),
+        &[],
+    );
+    let child = repos.repository("child", json!({}), &[]);
+    fs::write(child.join("untracked"), "new").unwrap();
+    let mut nix = TestNix::default();
+    error_contains(crate::preflight::preflight(&mut nix, &root), "untracked");
+    assert_eq!(nix.reads.len(), 3);
+    fs::remove_file(child.join("untracked")).unwrap();
+    fs::write(
+        child.join("inputs.json"),
+        json!({"loop": {"url": "git+file:../root"}}).to_string(),
+    )
+    .unwrap();
+    error_contains(crate::preflight::preflight(&mut nix, &root), "cycle");
+}
+
+#[test]
 fn failed_lock_never_writes_live_locks_or_success_manifest() {
     let repos = Repositories::new();
     let root = repos.repository("project", json!({}), &[("flake.lock", "original lock")]);

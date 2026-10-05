@@ -8,6 +8,7 @@ mod graph;
 mod lock;
 mod nix;
 mod policy;
+mod preflight;
 mod snapshot;
 
 #[cfg(test)]

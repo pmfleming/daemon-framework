@@ -59,7 +59,7 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     )
 }
 
-pub(crate) fn snapshot(root: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn validate_worktree(root: &Path) -> Result<()> {
     let top = git(root, &["rev-parse", "--show-toplevel"])?;
     let top = top.strip_suffix(b"\n").unwrap_or(&top);
     ensure!(
@@ -74,6 +74,11 @@ pub(crate) fn snapshot(root: &Path, destination: &Path) -> Result<()> {
         root.display(),
         String::from_utf8_lossy(&untracked).replace('\0', "\n")
     );
+    Ok(())
+}
+
+pub(crate) fn snapshot(root: &Path, destination: &Path) -> Result<()> {
+    validate_worktree(root)?;
     fs::create_dir_all(destination)?;
     let files = git(root, &["ls-files", "--cached", "-z"])?;
     for entry in files

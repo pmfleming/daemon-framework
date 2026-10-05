@@ -3,7 +3,13 @@ use std::{ffi::OsString, os::unix::ffi::OsStrExt, path::PathBuf, process::Comman
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
 
-use crate::{command::run, graph::prepare, lock::prune_file, nix::Nix};
+use crate::{
+    command::run,
+    graph::{prepare, prepare_with_capture},
+    lock::prune_file,
+    nix::Nix,
+    preflight::preflight,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -24,6 +30,13 @@ enum Action {
         destination: PathBuf,
         #[arg(long)]
         root_is_snapshot: bool,
+        /// Retain the captured root before lock resolution for baseline approval.
+        #[arg(long)]
+        capture_root: bool,
+    },
+    /// List every discoverable worktree problem without snapshotting or building.
+    Preflight {
+        root: PathBuf,
     },
     /// Remove local inputs from an explicitly supplied lock, retaining remote pins.
     PruneLock {
@@ -59,11 +72,22 @@ impl Cli {
                 root,
                 destination,
                 root_is_snapshot,
+                capture_root,
             } => {
                 println!(
                     "{}",
-                    serde_json::to_string(&prepare(nix, &root, &destination, root_is_snapshot)?)?
+                    serde_json::to_string(&prepare_with_capture(
+                        nix,
+                        &root,
+                        &destination,
+                        root_is_snapshot,
+                        capture_root
+                    )?)?
                 );
+                Ok(())
+            }
+            Action::Preflight { root } => {
+                println!("{}", serde_json::to_string(&preflight(nix, &root)?)?);
                 Ok(())
             }
             Action::PruneLock { root, lock } => prune_file(nix, &root, &lock),

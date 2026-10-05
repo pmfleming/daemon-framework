@@ -29,11 +29,18 @@ the installed package to replace the previous Python-backed desktop command.
 
 ## Compatible CLI and guarantees
 
-- `prepare ROOT DESTINATION [--root-is-snapshot]` leaves a persistent prepared
+- `preflight ROOT` reports every discoverable worktree problem together before
+  authentication, or prints JSON with `repositories`. It respects follows and
+  nested overlays, without snapshotting, locking or changing Git tracking.
+  Preparation repeats worktree validation rather than trusting this early check.
+- `prepare ROOT DESTINATION [--root-is-snapshot] [--capture-root]` leaves a persistent prepared
   graph, prints its JSON description, and writes `DESTINATION/sources.json`.
   The keys remain `flake`, `sources`, and `storeSources`. The destination must
   not already exist. A frozen root is copied without dereferencing symlinks;
   its destination must be outside that root to prevent recursive copying.
+  `--capture-root` additionally retains `DESTINATION/.approval-root` before lock
+  resolution and returns its path as `originalRoot`. Rebuild approval uses this
+  exact captured source and original lock, never a second live checkout copy.
 - `prune-lock ROOT LOCK` rewrites only the explicitly supplied lock. It removes
   local input roots and unreachable nodes while retaining remote pins and other
   lock metadata. Follows cycles and missing references fail instead of hanging.
@@ -70,7 +77,9 @@ repositories. Additional unit and binary integration tests exercise aliases,
 follows cycles, graph cycles/collisions, lock failure, read-only/executable files,
 dangling links, argument forwarding, JSON output and temporary cleanup. Nix is
 substituted at a narrow interface in unit tests; binary tests use a per-child
-mock executable. Tests do not modify the process environment globally or require
+mock executable. Coverage also includes aggregated preflight failures, distinct
+nested overlays and preserving the approval lock before disposable resolution.
+Tests do not modify the process environment globally or require
 a Nix daemon/network (after Cargo dependencies are available).
 
 Existing invocations must change from `python3 .../tools/local-build.py` to

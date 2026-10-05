@@ -91,6 +91,48 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn approval_capture_preserves_original_lock_before_resolution() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("flake.lock"), "{\"original\": true}\n").unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&fixture.root)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let destination = fixture.root.parent().unwrap().join("captured");
+    let output = fixture
+        .command()
+        .arg("prepare")
+        .arg(&fixture.root)
+        .arg(&destination)
+        .arg("--capture-root")
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["originalRoot"],
+        destination.join(".approval-root").to_str().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join(".approval-root/flake.lock")).unwrap(),
+        "{\"original\": true}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("root/flake.lock")).unwrap(),
+        "{}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("flake.lock")).unwrap(),
+        "{\"original\": true}\n"
+    );
+}
+
+#[test]
 fn invocation_uses_frozen_lock_forwards_arguments_and_cleans_up_on_success_or_failure() {
     let fixture = Fixture::new();
     for (action, status) in [("check", 0), ("build", 0), ("develop", 17), ("run", 0)] {

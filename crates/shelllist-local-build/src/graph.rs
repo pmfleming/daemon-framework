@@ -26,6 +26,8 @@ pub(crate) struct Prepared {
     pub flake: String,
     pub sources: BTreeMap<PathBuf, PathBuf>,
     pub store_sources: BTreeMap<PathBuf, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_root: Option<PathBuf>,
 }
 
 pub(crate) fn prepare(
@@ -33,6 +35,18 @@ pub(crate) fn prepare(
     root: &Path,
     destination: &Path,
     root_is_snapshot: bool,
+) -> Result<Prepared> {
+    prepare_with_capture(nix, root, destination, root_is_snapshot, false)
+}
+
+/// Optionally retain the exact captured root before disposable lock resolution.
+/// Approval consumers must never reconstruct that identity from a live checkout.
+pub(crate) fn prepare_with_capture(
+    nix: &mut impl Nix,
+    root: &Path,
+    destination: &Path,
+    root_is_snapshot: bool,
+    capture_root: bool,
 ) -> Result<Prepared> {
     let root = resolve(root)?;
     let destination = resolve(destination)?;
@@ -58,8 +72,17 @@ pub(crate) fn prepare(
     graph.walk(&root, None, "", &mut BTreeSet::new())?;
     let source = graph.sources.get(&root).context("root was not captured")?;
     validate_policy(&graph.sources, &source.inputs)?;
+    let original_root = if capture_root {
+        let original = destination.join(".approval-root");
+        ensure!(!original.exists(), "approval snapshot basename collision");
+        copy_tree(&source.directory, &original)?;
+        Some(original)
+    } else {
+        None
+    };
     graph.nix.lock(&source.directory, &graph.overrides)?;
     let result = Prepared {
+        original_root,
         flake: flake_ref(&source.directory)?,
         sources: graph
             .sources

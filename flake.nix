@@ -135,6 +135,8 @@
                   ]
                 }
             '';
+            # Fixtures intercept Nix through PATH, without the runtime wrapper.
+            passthru.unwrappedProgram = "${self.packages.${system}.localBuild}/bin/.local-build-wrapped";
             meta = {
               description = "Build one snapshot of the current local Shelllist development graph";
               license = pkgs.lib.licenses.mit;
