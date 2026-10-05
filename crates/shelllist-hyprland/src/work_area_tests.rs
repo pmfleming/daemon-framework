@@ -73,16 +73,55 @@ fn smart_gaps_and_group_visibility_filters() {
     parts[3][1]["floating"] = json!(true);
     parts[3][1]["pinned"] = json!(true);
     parts[3][1]["visible"] = json!(false);
-    for selector in ["w[p1]", "w[fv0]", "w[tf0]"] {
+    for selector in ["w[p1]", "w[fv0]"] {
         assert_rule(&mut parts, selector, "eDP-1", 51.0);
     }
     parts[3][0]["fullscreen"] = json!(2);
-    for (selector, top) in [("f[0]", 51.0), ("f[1]", 53.0), ("f[other]", 51.0)] {
+    parts[1][0]["hasfullscreen"] = json!(true);
+    for (selector, top) in [("f[0]", 51.0), ("f[1]", 53.0), ("f[other]", 53.0)] {
         assert_rule(&mut parts, selector, "eDP-1", top);
     }
     parts[3][0]["workspace"]["id"] = json!(3);
     assert_rule(&mut parts, "f[0]", "eDP-1", 53.0);
 }
+#[test]
+fn selector_validation_matches_hyprland_workspace_cpp() {
+    let mut parts = fixture();
+    // Native parsing rejects duplicate/conflicting flags and zero-based ranges,
+    // but a single zero window count is valid. Malformed fullscreen isn't f[2].
+    for selector in [
+        "w[tf0]",
+        "w[ft0]",
+        "w[tt1]",
+        "w[gg1]",
+        "w[pp0]",
+        "w[vv2]",
+        "r[0-2]",
+        "r[2-1]",
+        "w[0-2]",
+        "f[other]",
+        "f[]",
+        "f[2147483648]",
+    ] {
+        assert_rule(&mut parts, selector, "eDP-1", 53.0);
+    }
+    for selector in [
+        "w[0]", "w[t0]", "f[2]", "s[0]", "s[false]", "n[0]", "n[bogus]",
+    ] {
+        assert_rule(&mut parts, selector, "DP-1", 80.0);
+    }
+    for selector in ["s[2]", "n[2]"] {
+        assert_rule(&mut parts, selector, "DP-1", 82.0);
+    }
+    parts[3][0]["fullscreen"] = json!(2);
+    assert_rule(&mut parts, "f[0]", "eDP-1", 53.0); // workspace has no fullscreen
+    parts[1][0]["hasfullscreen"] = json!(true);
+    for selector in ["f[0]", "f[+0]", "f[0suffix]"] {
+        assert_rule(&mut parts, selector, "eDP-1", 51.0);
+    }
+    assert_rule(&mut parts, "f[-1]", "eDP-1", 53.0);
+}
+
 #[test]
 fn named_special_monitor_and_malformed_selectors() {
     let mut parts = fixture();

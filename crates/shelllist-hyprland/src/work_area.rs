@@ -245,8 +245,45 @@ fn window_count(flags: &str, workspace: &Workspace, clients: &[Window]) -> usize
         .count()
 }
 fn range(value: &str) -> Option<std::ops::RangeInclusive<i64>> {
-    let (low, high) = value.split_once('-').unwrap_or((value, value));
-    Some(low.parse::<u32>().ok()? as i64..=high.parse::<u32>().ok()? as i64)
+    if let Some((low, high)) = value.split_once('-') {
+        let (low, high) = (low.parse::<i64>().ok()?, high.parse::<i64>().ok()?);
+        return (low >= 1 && high >= low).then_some(low..=high);
+    }
+    let count = value.parse::<i64>().ok()?;
+    Some(count..=count)
+}
+
+// Hyprland consumes each window flag once; t/f are mutually exclusive. Leaving
+// an invalid flag in the numeric suffix makes the whole selector fail.
+fn window_selector(value: &str) -> (&str, &str) {
+    let mut seen = 0_u8;
+    let split = value
+        .find(|flag| {
+            let bit = match flag {
+                't' | 'f' => 1,
+                'p' => 2,
+                'g' => 4,
+                'v' => 8,
+                _ => return true,
+            };
+            let duplicate = seen & bit != 0;
+            seen |= bit;
+            duplicate
+        })
+        .unwrap_or(value.len());
+    value.split_at(split)
+}
+
+fn selector_integer(value: &str) -> Option<i64> {
+    for (prefixes, number) in [(["true", "on", "yes"], 1), (["false", "off", "no"], 0)] {
+        if prefixes.iter().any(|prefix| value.starts_with(prefix)) {
+            return Some(number);
+        }
+    }
+    match value.strip_prefix("0x") {
+        Some(hex) => i64::from_str_radix(hex, 16).ok(),
+        None => value.parse().ok(),
+    }
 }
 fn term(
     kind: char,
@@ -255,25 +292,24 @@ fn term(
     monitor: &Monitor,
     snapshot: &Snapshot,
 ) -> bool {
-    let boolean = matches!(value, "true" | "1" | "yes" | "on");
+    let integer = selector_integer(value);
     match kind {
         'r' => {
             value.contains('-') && range(value).is_some_and(|range| range.contains(&workspace.id))
         }
-        's' => (workspace.id < -1 && workspace.id > -1337) == boolean,
+        's' => {
+            integer.is_none_or(|value| (workspace.id < -1 && workspace.id > -1337) == (value != 0))
+        }
         'n' => match value.split_once(':') {
             Some(("s", prefix)) => workspace.name.starts_with(prefix),
             Some(("e", suffix)) => workspace.name.ends_with(suffix),
-            _ => (workspace.id <= -1337) == boolean,
+            _ => integer.is_none_or(|value| i64::from(workspace.id <= -1337) == value),
         },
         'm' => monitor_matches(value, monitor, &snapshot.monitors),
         'w' => {
-            let split = value
-                .find(|c: char| !"tfpgv".contains(c))
-                .unwrap_or(value.len());
-            range(&value[split..]).is_some_and(|range| {
-                range
-                    .contains(&(window_count(&value[..split], workspace, &snapshot.clients) as i64))
+            let (flags, count) = window_selector(value);
+            range(count).is_some_and(|range| {
+                range.contains(&(window_count(flags, workspace, &snapshot.clients) as i64))
             })
         }
         'f' => fullscreen_matches(value, workspace, &snapshot.clients),
@@ -281,15 +317,24 @@ fn term(
     }
 }
 fn fullscreen_matches(value: &str, workspace: &Workspace, clients: &[Window]) -> bool {
-    let mode = match value {
-        "-1" => return !workspace.hasfullscreen,
-        "0" => 2,
-        "1" => 1,
-        _ => return true,
+    // C++ stoi accepts a signed decimal prefix but rejects missing/overflowing
+    // numbers. Unknown *numeric* modes are deliberately unconstrained upstream.
+    let value = value.trim_start();
+    let end = value
+        .char_indices()
+        .find(|(i, c)| !(c.is_ascii_digit() || *i == 0 && matches!(c, '+' | '-')))
+        .map_or(value.len(), |(i, _)| i);
+    let mode = match value[..end].parse::<i32>() {
+        Ok(-1) => return !workspace.hasfullscreen,
+        Ok(0) => 2,
+        Ok(1) => 1,
+        Ok(_) => return true,
+        Err(_) => return false,
     };
-    clients
-        .iter()
-        .any(|c| c.on(workspace) && c.fullscreen == mode)
+    workspace.hasfullscreen
+        && clients
+            .iter()
+            .any(|c| c.on(workspace) && c.fullscreen == mode)
 }
 fn matches(selector: &str, workspace: &Workspace, monitor: &Monitor, snapshot: &Snapshot) -> bool {
     let rest = selector.trim();
