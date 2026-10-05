@@ -5,6 +5,8 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use crate::file::{AtomicFilePolicy, write_bytes_atomic};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XdgRoot {
     Config,
@@ -133,15 +135,15 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
     } else {
         serde_json::to_vec(value)?
     };
-    crate::write_bytes_atomic(
+    write_bytes_atomic(
         path,
         &bytes,
-        crate::AtomicFilePolicy {
+        AtomicFilePolicy {
             directory_mode: Some(policy.directory_mode),
             file_mode: Some(policy.file_mode),
             sync_parent: policy.sync_parent,
             sync_new_ancestors: policy.sync_parent,
-            ..crate::AtomicFilePolicy::PRIVATE
+            ..AtomicFilePolicy::PRIVATE
         },
     )?;
     Ok(())

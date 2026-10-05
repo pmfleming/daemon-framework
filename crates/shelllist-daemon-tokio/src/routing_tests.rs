@@ -3,9 +3,7 @@ use serde_json::{Value, json};
 use shelllist_daemon_core::{ClientRoute, RouteKind};
 use tokio::io::sink;
 
-use super::{
-    BasicCorrelation, CorrelationPolicy, OutputCommand, OutputState, TrackedId, emit_command,
-};
+use super::{BasicCorrelation, CorrelationPolicy, OutputCommand, OutputState, emit_command};
 
 fn route(consumer: &str, generation: u64, kind: RouteKind) -> ClientRoute {
     ClientRoute {
@@ -101,24 +99,13 @@ async fn early_events_follow_the_addressed_reply_and_stay_owner_scoped() -> Resu
     assert_eq!(lines[1]["kind"], "event");
     assert_eq!(lines[1]["route"]["consumerId"], "a");
     assert_eq!(lines[3]["route"]["consumerId"], "b");
-    assert_eq!(
-        output.state.owned_ids(&route("a", 1, RouteKind::Control)),
-        ["sub-a"]
-    );
-    assert!(
-        output
-            .state
-            .owned_ids(&route("a", 2, RouteKind::Control))
-            .is_empty()
-    );
+    assert_eq!(output.state.owned_ids("a", 1), ["sub-a"]);
+    assert!(output.state.owned_ids("a", 2).is_empty());
     let repeated = json!({ "data": { "subscription": { "id": "sub-a" } } });
     output
         .state
         .activate(BasicCorrelation.response_id(&repeated), None);
-    assert_eq!(
-        output.state.owned_ids(&route("a", 1, RouteKind::Control)),
-        ["sub-a"]
-    );
+    assert_eq!(output.state.owned_ids("a", 1), ["sub-a"]);
     Ok(())
 }
 
@@ -136,10 +123,7 @@ async fn cancellation_failure_retains_ownership_success_and_reset_remove_it() ->
             route: Some(route("a", 1, RouteKind::Control)),
         })
         .await?;
-    assert_eq!(
-        output.state.owned_ids(&route("a", 1, RouteKind::Control)),
-        ["sub-a"]
-    );
+    assert_eq!(output.state.owned_ids("a", 1), ["sub-a"]);
     output
         .send(OutputCommand::Cancelled("sub-a".into()))
         .await?;
@@ -162,12 +146,6 @@ async fn cancellation_failure_retains_ownership_success_and_reset_remove_it() ->
 
 struct TerminalSubscription;
 impl CorrelationPolicy for TerminalSubscription {
-    fn response_id(&self, response: &Value) -> Option<TrackedId> {
-        BasicCorrelation.response_id(response)
-    }
-    fn event_id(&self, stream: &str, event: &Value) -> Option<String> {
-        BasicCorrelation.event_id(stream, event)
-    }
     fn is_terminal(&self, _stream: &str, _event: &Value) -> bool {
         true
     }
@@ -178,6 +156,8 @@ async fn terminal_events_keep_their_route_before_retiring_ownership() -> Result<
     for buffered in [false, true] {
         let mut output = Output::new(TerminalSubscription);
         if buffered {
+            output.send(event("sub-a")).await?;
+            // A terminal event also suppresses later events already in the buffer.
             output.send(event("sub-a")).await?;
         }
         output

@@ -30,12 +30,25 @@
         in
         {
           inherit protocolBindings;
-          localBuild = pkgs.writeShellApplication {
-            name = "local-build";
-            runtimeInputs = [ pkgs.python3 pkgs.git pkgs.nix ];
-            text = ''
-              exec python3 ${./tools/local-build.py} "$@"
+          localBuild = pkgs.rustPlatform.buildRustPackage {
+            pname = "local-build";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "-p" "shelllist-local-build" ];
+            cargoTestFlags = [ "-p" "shelllist-local-build" ];
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            nativeCheckInputs = [ pkgs.git ];
+            postInstall = ''
+              wrapProgram $out/bin/local-build \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git pkgs.nix ]}
             '';
+            meta = {
+              description = "Build one snapshot of the current local Shelllist development graph";
+              license = pkgs.lib.licenses.mit;
+              mainProgram = "local-build";
+              platforms = pkgs.lib.platforms.linux;
+            };
           };
           default = protocolBindings;
         });
@@ -44,13 +57,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
         in {
-          localBuild = pkgs.runCommand "local-build-policy-tests"
-            { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
-            export HOME=$TMPDIR
-            export PYTHONDONTWRITEBYTECODE=1
-            python3 ${self}/tools/test-local-build.py
-            touch $out
-          '';
+          localBuild = self.packages.${system}.localBuild;
           protocolBindings = self.packages.${system}.protocolBindings;
           workspace = pkgs.rustPlatform.buildRustPackage {
             pname = "daemon-framework-workspace-check";
@@ -59,12 +66,16 @@
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "--workspace" ];
             cargoTestFlags = [ "--workspace" ];
-            nativeCheckInputs = [ pkgs.dbus ];
+            nativeCheckInputs = [ pkgs.dbus pkgs.git ];
             installPhase = "touch $out";
           };
         });
 
       apps = forAllSystems (system: {
+        localBuild = {
+          type = "app";
+          program = "${self.packages.${system}.localBuild}/bin/local-build";
+        };
         protocolBindings = {
           type = "app";
           program = "${self.packages.${system}.protocolBindings}/bin/shelllist-protocol-js";
@@ -83,6 +94,7 @@
               cargo
               cargo-audit
               dbus
+              git
               clippy
               nixpkgs-fmt
               rust-analyzer

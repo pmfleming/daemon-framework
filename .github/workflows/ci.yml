@@ -29,12 +29,13 @@ jobs:
         with:
           path: daemon-framework
       - uses: cachix/install-nix-action@v31
+      - uses: dtolnay/rust-toolchain@stable
       - name: Check out current consumers
         run: |
           for repo in shelllist app-daemon bar-daemon bt-daemon clip-daemon nm-daemon; do
             git clone --depth 1 --branch main "https://github.com/pmfleming/$repo.git" "$repo"
           done
       - name: Test shared source policy
-        run: PYTHONDONTWRITEBYTECODE=1 python3 daemon-framework/tools/test-local-build.py
+        run: cargo test --locked --manifest-path daemon-framework/Cargo.toml -p shelllist-local-build
       - name: Test complete current-sibling matrix
-        run: python3 daemon-framework/tools/local-build.py check shelllist --keep-going --print-build-logs
+        run: daemon-framework/tools/local-build check shelllist --keep-going --print-build-logs

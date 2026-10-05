@@ -56,12 +56,7 @@ impl TaskGroup {
             state.closed = true;
             std::mem::take(&mut state.handles)
         };
-        for handle in &handles {
-            handle.abort();
-        }
-        for handle in handles {
-            let _ = handle.await;
-        }
+        abort_and_join(handles).await;
     }
 }
 
@@ -70,6 +65,16 @@ impl Drop for TaskGroup {
         for handle in &self.0.get_mut().unwrap_or_else(|p| p.into_inner()).handles {
             handle.abort();
         }
+    }
+}
+
+/// Abort the entire batch before waiting for any one worker to finish.
+pub(crate) async fn abort_and_join(handles: Vec<JoinHandle<()>>) {
+    for handle in &handles {
+        handle.abort();
+    }
+    for handle in handles {
+        let _ = handle.await;
     }
 }
 
@@ -132,18 +137,19 @@ mod tests {
         tasks.shutdown().await;
     }
 
+    struct ReconnectOnDrop(Arc<TaskGroup>, Arc<()>);
+    impl Drop for ReconnectOnDrop {
+        fn drop(&mut self) {
+            let marker = self.1.clone();
+            assert!(!self.0.spawn("late", async move {
+                let _marker = marker;
+                std::future::pending::<()>().await;
+            }));
+        }
+    }
+
     #[tokio::test]
     async fn abort_closes_gate_before_cancellation_cleanup() {
-        struct ReconnectOnDrop(Arc<TaskGroup>, Arc<()>);
-        impl Drop for ReconnectOnDrop {
-            fn drop(&mut self) {
-                let marker = self.1.clone();
-                assert!(!self.0.spawn("late", async move {
-                    let _marker = marker;
-                    std::future::pending::<()>().await;
-                }));
-            }
-        }
         let tasks = Arc::new(TaskGroup::default());
         let marker = Arc::new(());
         let guard = ReconnectOnDrop(tasks.clone(), marker.clone());

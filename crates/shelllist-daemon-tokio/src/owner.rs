@@ -4,6 +4,8 @@ use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, broadcast, watch};
 
+use crate::task::{AbortOnDrop, spawn_named};
+
 #[derive(Clone)]
 pub struct OwnerLossMonitor(Arc<Monitor>);
 
@@ -15,7 +17,7 @@ struct Monitor {
 struct Running {
     losses: broadcast::Sender<String>,
     stopped: watch::Receiver<bool>,
-    _task: crate::AbortOnDrop,
+    _task: AbortOnDrop,
 }
 
 impl OwnerLossMonitor {
@@ -35,7 +37,7 @@ impl OwnerLossMonitor {
                 let (losses, _) = broadcast::channel(64);
                 let publisher = losses.clone();
                 let (stopped, state) = watch::channel(false);
-                let task = crate::spawn_named("D-Bus-owner-monitor", async move {
+                let task = spawn_named("D-Bus-owner-monitor", async move {
                     while let Some(message) = changes.next().await {
                         let Ok((name, old, new)) =
                             message.body().deserialize::<(String, String, String)>()
@@ -52,7 +54,7 @@ impl OwnerLossMonitor {
                 Ok(Running {
                     losses,
                     stopped: state,
-                    _task: crate::AbortOnDrop(task.abort_handle()),
+                    _task: AbortOnDrop(task.abort_handle()),
                 })
             })
             .await

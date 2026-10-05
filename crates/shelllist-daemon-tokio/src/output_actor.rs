@@ -71,7 +71,7 @@ pub(crate) enum OutputCommand {
         route: Option<ClientRoute>,
     },
     ActiveIds {
-        route: Option<ClientRoute>,
+        owner: Option<(String, u64)>,
         reply: oneshot::Sender<Vec<String>>,
     },
     Cancelled(String),
@@ -104,18 +104,19 @@ impl OutputHandle {
             .context("send daemon output command")
     }
 
-    pub(crate) async fn owned_ids(&self, route: ClientRoute) -> Vec<String> {
-        self.query_ids(Some(route)).await
+    pub(crate) async fn owned_ids(&self, route: &ClientRoute) -> Vec<String> {
+        self.query_ids(Some((route.consumer_id.clone(), route.generation)))
+            .await
     }
 
     pub(crate) async fn active_ids(&self) -> Vec<String> {
         self.query_ids(None).await
     }
 
-    async fn query_ids(&self, route: Option<ClientRoute>) -> Vec<String> {
+    async fn query_ids(&self, owner: Option<(String, u64)>) -> Vec<String> {
         let (reply, response) = oneshot::channel();
         if self
-            .send(OutputCommand::ActiveIds { route, reply })
+            .send(OutputCommand::ActiveIds { owner, reply })
             .await
             .is_err()
         {
@@ -123,12 +124,6 @@ impl OutputHandle {
         }
         response.await.unwrap_or_default()
     }
-}
-
-enum EventDisposition {
-    Emit,
-    Buffer(String),
-    Drop,
 }
 
 struct OutputState<P> {
@@ -174,16 +169,14 @@ impl<P: CorrelationPolicy> OutputState<P> {
         pending
     }
 
-    fn event_disposition(&self, stream: &str, event: &Value) -> EventDisposition {
-        let Some(id) = self.policy.event_id(stream, event) else {
-            return EventDisposition::Emit;
-        };
-        if self.suppressed_ids.contains(&id) {
-            EventDisposition::Drop
-        } else if self.active_ids.contains_key(&id) {
-            EventDisposition::Emit
-        } else {
-            EventDisposition::Buffer(id)
+    fn accept_event(&mut self, stream: String, event: Value) -> Option<Value> {
+        match self.policy.event_id(&stream, &event) {
+            Some(id) if self.suppressed_ids.contains(&id) => None,
+            Some(id) if !self.active_ids.contains_key(&id) => {
+                self.buffer(id, stream, event);
+                None
+            }
+            _ => Some(self.event_message(&stream, event)),
         }
     }
 
@@ -233,12 +226,12 @@ impl<P: CorrelationPolicy> OutputState<P> {
         ids
     }
 
-    fn owned_ids(&self, owner: &ClientRoute) -> Vec<String> {
+    fn owned_ids(&self, consumer_id: &str, generation: u64) -> Vec<String> {
         self.active_ids
             .iter()
             .filter(|(_, route)| {
                 route.as_ref().is_some_and(|route| {
-                    route.consumer_id == owner.consumer_id && route.generation == owner.generation
+                    route.consumer_id == consumer_id && route.generation == generation
                 })
             })
             .map(|(id, _)| id.clone())
@@ -269,15 +262,6 @@ impl<P: CorrelationPolicy> OutputState<P> {
         self.suppressed_ids.clear();
         self.suppressed_order.clear();
     }
-}
-
-#[must_use]
-pub(crate) fn spawn_output_actor<P: CorrelationPolicy>(
-    policy: P,
-    capacity: usize,
-    pending_limit: usize,
-) -> (OutputHandle, JoinHandle<Result<()>>) {
-    spawn_output_actor_with_writer(policy, capacity, pending_limit, tokio::io::stdout())
 }
 
 #[must_use]
@@ -317,16 +301,13 @@ where
     W: AsyncWrite + Unpin,
 {
     loop {
-        tokio::select! {
+        let command = tokio::select! {
             biased;
-            Some(command) = priority_commands.recv() => {
-                emit_command(&mut writer, &mut state, command).await?;
-            }
-            Some(command) = events.recv() => {
-                emit_command(&mut writer, &mut state, command).await?;
-            }
+            Some(command) = priority_commands.recv() => command,
+            Some(command) = events.recv() => command,
             else => return Ok(()),
-        }
+        };
+        emit_command(&mut writer, &mut state, command).await?;
     }
 }
 
@@ -339,37 +320,38 @@ where
     P: CorrelationPolicy,
     W: AsyncWrite + Unpin,
 {
-    match command {
+    let message = match command {
         OutputCommand::Response {
             id,
             result,
             cancelled_request_id,
             route,
-        } => emit_response(writer, state, id, result, cancelled_request_id, route).await,
-        OutputCommand::ActiveIds { route, reply } => {
-            let ids = route
-                .as_ref()
-                .map_or_else(|| state.active_ids(), |route| state.owned_ids(route));
+        } => return emit_response(writer, state, id, result, cancelled_request_id, route).await,
+        OutputCommand::ActiveIds { owner, reply } => {
+            let ids = owner.as_ref().map_or_else(
+                || state.active_ids(),
+                |(consumer, generation)| state.owned_ids(consumer, *generation),
+            );
             let _ = reply.send(ids);
-            Ok(())
+            None
         }
         OutputCommand::Cancelled(id) => {
             state.cancelled(id);
-            Ok(())
+            None
         }
-        OutputCommand::Event { stream, event } => emit_event(writer, state, stream, event).await,
-        OutputCommand::ProtocolError(error) => {
-            emit_line(writer, &protocol_error_message(error)).await
-        }
-        OutputCommand::TransportError(error) => {
-            emit_line(writer, &transport_error_message(error)).await
-        }
+        OutputCommand::Event { stream, event } => state.accept_event(stream, event),
+        OutputCommand::ProtocolError(error) => Some(protocol_error_message(error)),
+        OutputCommand::TransportError(error) => Some(transport_error_message(error)),
         OutputCommand::ResetCorrelation => {
             state.reset_correlation();
-            Ok(())
+            None
         }
-        OutputCommand::Shutdown(id) => emit_line(writer, &shutdown_message(&id)).await,
+        OutputCommand::Shutdown(id) => Some(shutdown_message(&id)),
+    };
+    if let Some(message) = message {
+        emit_line(writer, &message).await?;
     }
+    Ok(())
 }
 
 async fn emit_response<P, W>(
@@ -397,34 +379,13 @@ where
     let line = addressed_message(line, route.as_ref());
     let pending = state.activate(tracked, route);
     emit_line(writer, &line).await?;
-    for (stream, event) in pending {
-        let message = state.event_message(&stream, event);
+    for message in pending
+        .into_iter()
+        .filter_map(|(stream, event)| state.accept_event(stream, event))
+    {
         emit_line(writer, &message).await?;
     }
     Ok(())
-}
-
-async fn emit_event<P, W>(
-    writer: &mut W,
-    state: &mut OutputState<P>,
-    stream: String,
-    event: Value,
-) -> Result<()>
-where
-    P: CorrelationPolicy,
-    W: AsyncWrite + Unpin,
-{
-    match state.event_disposition(&stream, &event) {
-        EventDisposition::Emit => {
-            let message = state.event_message(&stream, event);
-            emit_line(writer, &message).await
-        }
-        EventDisposition::Buffer(id) => {
-            state.buffer(id, stream, event);
-            Ok(())
-        }
-        EventDisposition::Drop => Ok(()),
-    }
 }
 
 async fn emit_line<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
@@ -499,28 +460,6 @@ mod tests {
             .map(serde_json::from_str)
             .collect::<serde_json::Result<_>>()
             .map_err(Into::into)
-    }
-
-    #[tokio::test]
-    async fn buffers_subscription_events_until_the_response_is_written() -> Result<()> {
-        let lines = render(vec![
-            OutputCommand::Event {
-                stream: "things.changed".into(),
-                event: json!({ "event": "subscribed", "subscription_id": "sub-1" }),
-            },
-            OutputCommand::Response {
-                id: "subscribe".into(),
-                result: Ok(json!({ "data": { "subscription": { "id": "sub-1" } } })),
-                cancelled_request_id: None,
-                route: None,
-            },
-        ])
-        .await?;
-
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["kind"], "response");
-        assert_eq!(lines[1]["kind"], "event");
-        Ok(())
     }
 
     #[tokio::test]

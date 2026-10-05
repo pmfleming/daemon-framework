@@ -66,10 +66,8 @@ impl ClientMessage {
                 Ok(())
             };
         };
-        if route.consumer_id.is_empty()
-            || route.consumer_id.len() > 256
-            || route.local_id.is_empty()
-            || route.local_id.len() > 1024
+        if !(1..=256).contains(&route.consumer_id.len())
+            || !(1..=1024).contains(&route.local_id.len())
         {
             return Err("invalid bridge route identifier length");
         }

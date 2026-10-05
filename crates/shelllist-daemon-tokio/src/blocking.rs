@@ -113,12 +113,7 @@ impl BlockingLane {
         &self,
         task: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, LaneError> {
-        let (reply, receive) = std::sync::mpsc::sync_channel(1);
-        self.try_submit(move || {
-            let _ =
-                reply.send(catch_unwind(AssertUnwindSafe(task)).map_err(|_| LaneError::Panicked));
-        })?;
-        receive.recv().map_err(|_| LaneError::Closed)?
+        futures::executor::block_on(self.call_async(task))
     }
 
     /// Admission is synchronous, before allocating a Tokio blocking task. Dropping
@@ -238,9 +233,8 @@ mod tests {
     use super::{BlockingLane, LaneError};
     use std::time::Duration;
     use tokio::sync::oneshot;
-    #[tokio::test]
-    async fn bounds_admission_contains_panics_and_rejects_after_shutdown() {
-        let lane = BlockingLane::start(&tokio::runtime::Handle::current(), "test", 1, 1);
+
+    async fn hold_job(lane: &BlockingLane) -> std::sync::mpsc::SyncSender<()> {
         let (started, ready) = oneshot::channel();
         let (release, held) = std::sync::mpsc::sync_channel(1);
         lane.try_submit(move || {
@@ -249,6 +243,24 @@ mod tests {
         })
         .unwrap();
         ready.await.unwrap();
+        release
+    }
+
+    #[test]
+    fn synchronous_calls_share_reply_and_panic_handling() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let lane = BlockingLane::start(runtime.handle(), "sync", 1, 1);
+        assert_eq!(lane.call(|| 42), Ok(42));
+        assert_eq!(lane.call(|| panic!("injected")), Err(LaneError::Panicked));
+        assert_eq!(lane.call(|| 7), Ok(7));
+        runtime.block_on(lane.shutdown(Duration::from_secs(1)));
+        assert_eq!(lane.call(|| 0), Err(LaneError::Closed));
+    }
+
+    #[tokio::test]
+    async fn bounds_admission_contains_panics_and_rejects_after_shutdown() {
+        let lane = BlockingLane::start(&tokio::runtime::Handle::current(), "test", 1, 1);
+        let release = hold_job(&lane).await;
         let queued = lane.call_async(|| 42);
         assert_eq!(lane.try_submit(|| {}), Err(LaneError::Full));
         release.send(()).unwrap();
@@ -292,14 +304,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_reports_running_jobs_and_drops_queued_replies() {
         let lane = BlockingLane::start(&tokio::runtime::Handle::current(), "slow", 1, 1);
-        let (started, ready) = oneshot::channel();
-        let (release, held) = std::sync::mpsc::sync_channel(1);
-        lane.try_submit(move || {
-            started.send(()).unwrap();
-            held.recv_timeout(Duration::from_secs(5)).unwrap();
-        })
-        .unwrap();
-        ready.await.unwrap();
+        let release = hold_job(&lane).await;
         let queued = lane.call_async(|| 42);
         let report = lane.shutdown(Duration::from_millis(5)).await;
         assert_eq!(report.active_jobs, 1);

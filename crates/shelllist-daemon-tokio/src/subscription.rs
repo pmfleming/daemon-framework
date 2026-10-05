@@ -8,6 +8,11 @@ use shelllist_daemon_core::{
 };
 use tokio::{sync::oneshot, task::JoinHandle};
 
+use crate::{
+    owner::OwnerLossMonitor,
+    task::{abort_and_join, spawn_named},
+};
+
 struct OwnedTask {
     task: JoinHandle<()>,
     generation: Arc<()>,
@@ -22,7 +27,7 @@ struct State {
 pub struct OwnedTaskRegistry {
     ids: IdSequence,
     state: Arc<Mutex<State>>,
-    owners: OnceLock<crate::OwnerLossMonitor>,
+    owners: OnceLock<OwnerLossMonitor>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,9 +118,9 @@ impl OwnedTaskRegistry {
     }
 
     /// Lazily binds this registry's monitor to its serving connection.
-    pub fn owner_monitor(&self, connection: &zbus::Connection) -> crate::OwnerLossMonitor {
+    pub fn owner_monitor(&self, connection: &zbus::Connection) -> OwnerLossMonitor {
         self.owners
-            .get_or_init(|| crate::OwnerLossMonitor::new(connection.clone()))
+            .get_or_init(|| OwnerLossMonitor::new(connection.clone()))
             .clone()
     }
 
@@ -161,7 +166,7 @@ impl OwnedTaskRegistry {
                 id: id.to_owned(),
                 generation: generation.clone(),
             };
-            let task = crate::spawn_named("owned-task", async move {
+            let task = spawn_named("owned-task", async move {
                 let _registration = registration;
                 if ready.await.is_err() {
                     return;
@@ -194,12 +199,7 @@ impl OwnedTaskRegistry {
                 .map(|task| task.value.task)
                 .collect::<Vec<_>>()
         };
-        for task in &tasks {
-            task.abort();
-        }
-        for task in tasks {
-            let _ = task.await;
-        }
+        abort_and_join(tasks).await;
     }
 }
 

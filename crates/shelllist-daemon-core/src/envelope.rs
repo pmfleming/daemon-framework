@@ -107,37 +107,24 @@ pub fn event_envelope(
         Value::Object(fields) => fields,
         _ => Map::new(),
     };
-    for reserved in [
-        "protocol",
-        "version",
-        "stream",
-        "event",
-        "subscription_id",
-        "request_id",
-    ] {
-        envelope.remove(reserved);
-    }
-    envelope.extend(Map::from_iter([
+    envelope.remove("subscription_id");
+    envelope.remove("request_id");
+    envelope.extend([
         ("protocol".into(), json!(api.protocol)),
         ("version".into(), json!(api.version)),
         ("stream".into(), json!(stream)),
         ("event".into(), json!(event)),
-    ]));
-    match correlation {
-        Correlation::None => {}
-        Correlation::Subscription(id) => {
-            envelope.insert("subscription_id".into(), json!(id));
-        }
-        Correlation::Request(id) => {
-            envelope.insert("request_id".into(), json!(id));
-        }
-        Correlation::Both {
-            subscription_id,
-            request_id,
-        } => {
-            envelope.insert("subscription_id".into(), json!(subscription_id));
-            envelope.insert("request_id".into(), json!(request_id));
-        }
+    ]);
+    if let Correlation::Subscription(id)
+    | Correlation::Both {
+        subscription_id: id,
+        ..
+    } = correlation
+    {
+        envelope.insert("subscription_id".into(), json!(id));
+    }
+    if let Correlation::Request(id) | Correlation::Both { request_id: id, .. } = correlation {
+        envelope.insert("request_id".into(), json!(id));
     }
     Value::Object(envelope)
 }
@@ -146,8 +133,7 @@ pub fn event_envelope(
 mod tests {
     use serde_json::json;
 
-    use super::{ApiError, Correlation, error, event_envelope};
-    use crate::ApiIdentity;
+    use super::{ApiError, ApiIdentity, Correlation, error, event_envelope};
 
     const API: ApiIdentity = ApiIdentity::new("test-api", 1);
 
@@ -174,27 +160,53 @@ mod tests {
 
     #[test]
     fn domain_fields_cannot_replace_envelope_identity() {
-        let event = event_envelope(
-            API,
-            "things.changed",
-            "changed",
-            Correlation::Subscription("sub-1"),
-            json!({
-                "protocol": "spoofed",
-                "version": 99,
-                "stream": "spoofed",
-                "event": "spoofed",
-                "subscription_id": "spoofed",
-                "request_id": "spoofed",
-                "data": { "revision": 2 }
-            }),
+        for (correlation, subscription, request) in [
+            (Correlation::None, None, None),
+            (Correlation::Subscription("sub-1"), Some("sub-1"), None),
+            (Correlation::Request("req-1"), None, Some("req-1")),
+            (
+                Correlation::Both {
+                    subscription_id: "sub-1",
+                    request_id: "req-1",
+                },
+                Some("sub-1"),
+                Some("req-1"),
+            ),
+        ] {
+            let event = event_envelope(
+                API,
+                "things.changed",
+                "changed",
+                correlation,
+                json!({
+                    "protocol": "spoofed",
+                    "version": 99,
+                    "stream": "spoofed",
+                    "event": "spoofed",
+                    "subscription_id": "spoofed",
+                    "request_id": "spoofed",
+                    "data": { "revision": 2 }
+                }),
+            );
+            assert_eq!(event["protocol"], "test-api");
+            assert_eq!(event["version"], 1);
+            assert_eq!(event["stream"], "things.changed");
+            assert_eq!(event["event"], "changed");
+            assert_eq!(
+                event
+                    .get("subscription_id")
+                    .and_then(serde_json::Value::as_str),
+                subscription
+            );
+            assert_eq!(
+                event.get("request_id").and_then(serde_json::Value::as_str),
+                request
+            );
+            assert_eq!(event["data"]["revision"], 2);
+        }
+        assert_eq!(
+            event_envelope(API, "s", "e", Correlation::None, json!(null)),
+            event_envelope(API, "s", "e", Correlation::None, json!({})),
         );
-        assert_eq!(event["protocol"], "test-api");
-        assert_eq!(event["version"], 1);
-        assert_eq!(event["stream"], "things.changed");
-        assert_eq!(event["event"], "changed");
-        assert_eq!(event["subscription_id"], "sub-1");
-        assert!(event.get("request_id").is_none());
-        assert_eq!(event["data"]["revision"], 2);
     }
 }

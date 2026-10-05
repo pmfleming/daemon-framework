@@ -8,6 +8,8 @@ use tokio::{
     time::{MissedTickBehavior, interval, sleep},
 };
 
+use crate::task::{AbortOnDrop, spawn_named};
+
 /// BOOTTIME includes suspend, MONOTONIC does not. Discard preempted samples.
 #[must_use]
 pub fn suspend_offset() -> Option<i128> {
@@ -60,8 +62,8 @@ impl ResumeDetector {
 /// Publishes a monotonic generation; stops when the last consumer leaves.
 pub async fn monitor_resumes(sender: watch::Sender<u64>) {
     let (events, mut signals) = mpsc::channel(8);
-    let task = crate::spawn_named("logind-resumes", logind_events(events));
-    let _logind = crate::AbortOnDrop(task.abort_handle());
+    let task = spawn_named("logind-resumes", logind_events(events));
+    let _logind = AbortOnDrop(task.abort_handle());
     let mut poll = interval(Duration::from_secs(2));
     poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut detector = ResumeDetector::default();

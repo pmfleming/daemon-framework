@@ -151,7 +151,7 @@ Never vendor or revision-pin the framework. Cargo consumes live sibling sources;
 Nix builds use a single fresh snapshot of tracked worktrees, including dirty files:
 
 ```sh
-python3 tools/local-build.py check ../shelllist --keep-going
+tools/local-build check ../shelllist --keep-going
 # On the desktop, check and deploy that same current-source policy:
 rebuild
 ```

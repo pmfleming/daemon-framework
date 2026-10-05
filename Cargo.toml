@@ -4,6 +4,7 @@ members = [
   "crates/shelllist-daemon-core",
   "crates/shelllist-daemon-tokio",
   "crates/shelllist-hyprland",
+  "crates/shelllist-local-build",
 ]
 
 [workspace.package]

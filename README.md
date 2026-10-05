@@ -8,6 +8,7 @@ Shared Rust infrastructure for the Shelllist daemon family.
 - `shelllist-daemon-tokio` — D-Bus/JSONL transport, managed subscriptions, connection-scoped owner monitoring, task groups, bounded blocking lanes, resume detection, event forwarding, and async file helpers.
 - `shelllist-hyprland` — optional Hyprland IPC transport and compositor work-area interpretation shared by `app-daemon` and `bar-daemon`. It is a separate crate, not a dependency of core/Tokio or the other daemons.
 - `shelllist-protocol-js` — build tool that generates frontend constants from daemon-owned protocol registries.
+- `shelllist-local-build` — native `local-build` CLI and source-policy regression tests; development tooling, not a daemon dependency.
 
 The Shelllist-owned fuzzy ranking process lives with the frontend. Domain policy and frontend ranking do not belong in this infrastructure workspace.
 
@@ -60,23 +61,32 @@ introduce a vendored framework copy or a per-consumer framework revision pin.
 ## Development
 
 **Source policy:** all five daemons consume this current Git worktree. Cargo uses
-sibling paths; Nix development uses `tools/local-build.py` (installed as
-`local-build` on the desktop). It snapshots tracked files, including uncommitted
-edits, once per invocation and resolves only a disposable build graph. New files
+sibling paths; Nix development uses the Rust `local-build` CLI (installed as
+`local-build` on the desktop). `tools/local-build` bootstraps it from this checkout
+using Cargo; the packaged binary needs only Git and Nix, not Python or Cargo.
+It snapshots tracked files, including uncommitted edits, once per invocation and resolves only a disposable build graph. New files
 must be Git-added; ignored build products are excluded. Persistent locks select
 third-party dependencies only. Plain `nix build`/`flake check` can recreate local
 pins; do not use them as the co-development entry point.
 
 ```bash
-python3 tools/local-build.py check ../shelllist --keep-going
-python3 tools/local-build.py build ../app-daemon
-python3 tools/local-build.py develop .
+tools/local-build check ../shelllist --keep-going
+tools/local-build build ../app-daemon
+tools/local-build develop .
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-python3 tools/local-build.py check .
+tools/local-build check .
 rqlens measure hotspots
 ```
+
+The local-build tests run with `cargo test --workspace` (or
+`cargo test -p shelllist-local-build --locked`). They use real Git/filesystem
+fixtures and mock Nix, so no Nix daemon or network is needed for those tests.
+The CLI retains `prepare`, `prune-lock`, `check`, `build`, `develop`, and `run`;
+put `--attr NAME` before the root and forwarded arguments after it. Replace old
+`python3 tools/local-build.py ...` invocations with `tools/local-build ...`.
+See [local-build](docs/local-build.md) for bootstrap and migration details.
 
 Generate a JavaScript protocol binding by piping a daemon registry to:
 

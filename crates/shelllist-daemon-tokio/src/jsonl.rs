@@ -10,8 +10,13 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::JsonDbusClient;
-use crate::output_actor::{CorrelationPolicy, OutputCommand, OutputHandle, spawn_output_actor};
+use crate::{
+    dbus::JsonDbusClient,
+    output_actor::{
+        CorrelationPolicy, OutputCommand, OutputHandle, spawn_output_actor_with_writer,
+    },
+    task::AbortOnDrop,
+};
 
 const OUTPUT_CAPACITY: usize = 64;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
@@ -115,15 +120,15 @@ impl ReconnectingClient {
 
 pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>) -> Result<()> {
     let dbus = ReconnectingClient::new(config.endpoint);
-    let (output, output_task) = spawn_output_actor(
+    let (output, output_task) = spawn_output_actor_with_writer(
         config.correlation,
         OUTPUT_CAPACITY,
         config.pending_event_limit,
+        tokio::io::stdout(),
     );
     let event_task =
-        crate::AbortOnDrop(spawn_event_forwarder(dbus.clone(), output.clone()).abort_handle());
-    let owner_task =
-        crate::AbortOnDrop(spawn_owner_watcher(dbus.clone(), output.clone()).abort_handle());
+        AbortOnDrop(spawn_event_forwarder(dbus.clone(), output.clone()).abort_handle());
+    let owner_task = AbortOnDrop(spawn_owner_watcher(dbus.clone(), output.clone()).abort_handle());
 
     let mut calls = JoinSet::new();
     let request_slots = RequestSlots::new(config.max_in_flight_requests.max(1));
@@ -299,9 +304,9 @@ async fn release_consumer(
     mode: CancelMode,
 ) -> Result<Value> {
     let route = route.context("release requires a consumer route")?;
-    let ids = output.owned_ids(route.clone()).await;
+    let ids = output.owned_ids(route).await;
     with_transport_timeout(output, CONTROL_TIMEOUT, async {
-        let mut released = 0;
+        let released = ids.len();
         for id in ids {
             let response = cancel(&dbus.get().await?, &id, mode).await?;
             anyhow::ensure!(
@@ -309,7 +314,6 @@ async fn release_consumer(
                 "daemon rejected cancellation of {id}"
             );
             output.send(OutputCommand::Cancelled(id)).await?;
-            released += 1;
         }
         Ok(json!({ "released": released }))
     })

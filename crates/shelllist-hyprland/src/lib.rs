@@ -37,13 +37,7 @@ impl Client {
         let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(default_runtime_dir);
-        let signature = env::var("HYPRLAND_INSTANCE_SIGNATURE")
-            .ok()
-            .filter(|value| valid_signature(value));
-        Self {
-            runtime_dir,
-            signature,
-        }
+        Self::new(runtime_dir, env::var("HYPRLAND_INSTANCE_SIGNATURE").ok())
     }
 
     #[must_use]
@@ -86,27 +80,38 @@ impl Client {
 
     async fn instance_dir(&self, required_socket: &str) -> Result<PathBuf> {
         for root in self.roots() {
-            if let Some(signature) = &self.signature
-                && fs::try_exists(root.join(signature).join(required_socket))
-                    .await
-                    .unwrap_or(false)
-            {
-                return Ok(root.join(signature));
-            }
-            let Ok(mut entries) = fs::read_dir(&root).await else {
-                continue;
-            };
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                if fs::try_exists(path.join(required_socket))
-                    .await
-                    .unwrap_or(false)
-                {
-                    return Ok(path);
-                }
+            if let Some(path) = self.find_instance(&root, required_socket).await? {
+                return Ok(path);
             }
         }
         bail!("no active Hyprland IPC instance is available")
+    }
+
+    async fn find_instance(
+        &self,
+        root: &std::path::Path,
+        required_socket: &str,
+    ) -> Result<Option<PathBuf>> {
+        if let Some(signature) = &self.signature
+            && fs::try_exists(root.join(signature).join(required_socket))
+                .await
+                .unwrap_or(false)
+        {
+            return Ok(Some(root.join(signature)));
+        }
+        let Ok(mut entries) = fs::read_dir(root).await else {
+            return Ok(None);
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if fs::try_exists(path.join(required_socket))
+                .await
+                .unwrap_or(false)
+            {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -239,9 +244,24 @@ mod tests {
 
     #[tokio::test]
     async fn request_uses_bounded_socket_protocol_without_a_process() {
-        let (_root, client, server) = command_server("j/clients", "[]".into()).await;
+        let (root, mut client, server) = command_server("j/clients", "[]".into()).await;
         assert_eq!(client.request("j/clients").await.unwrap(), "[]");
         server.await.unwrap();
+        let root = root.path().join("hypr");
+        for signature in [None, Some("missing".into())] {
+            client.signature = signature;
+            assert_eq!(
+                client.find_instance(&root, COMMAND_SOCKET).await.unwrap(),
+                Some(root.join("test"))
+            );
+            assert!(
+                client
+                    .find_instance(&root, EVENT_SOCKET)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[tokio::test]

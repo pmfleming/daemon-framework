@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replace the Python local-build utility and its tests with the `shelllist-local-build` Rust workspace crate. The native CLI preserves source-policy and JSON/command contracts, with 21 Rust regression tests (including all 13 former Python scenarios). Use `tools/local-build` or the rebuilt installed `local-build`; the checkout launcher requires Cargo, while the packaged binary only needs Git/Nix. Nix checks, CI, and active sibling entrypoints now use the native tool.
+
 - Share operation/subscription response correlation through `CorrelationPolicy::operation_id`, and add `OwnedOperations::drain` for clone-free bulk claims.
 - Remove unused legacy `OwnedTaskRegistry::cancel_all`/`cancel_owner` and `wait_for_owner_loss`/`wait_for_owner_name_loss` APIs after auditing all local consumers. Use managed owner lifetimes, `cancel_owned`, `shutdown`, or an explicit connection-scoped `OwnerLossMonitor::wait`. This is a source API removal; deployed D-Bus/JSONL contracts are unchanged.
 

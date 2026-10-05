@@ -1,0 +1,6 @@
+#!/bin/sh
+# Bootstrap the native CLI from this checkout; packaged local-build needs no Cargo.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec cargo run --quiet --locked --manifest-path "$root/Cargo.toml" \
+  -p shelllist-local-build --bin local-build -- "$@"
