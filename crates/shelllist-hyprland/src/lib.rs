@@ -292,7 +292,7 @@ mod tests {
 
     pub(crate) async fn command_server(
         expected: &'static str,
-        reply: String,
+        reply: impl AsRef<[u8]> + Send + 'static,
     ) -> (tempfile::TempDir, Client, tokio::task::JoinHandle<()>) {
         let (root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
         let server = tokio::spawn(async move {
@@ -300,14 +300,14 @@ mod tests {
             let mut command = String::new();
             stream.read_to_string(&mut command).await.unwrap();
             assert_eq!(command, expected);
-            stream.write_all(reply.as_bytes()).await.unwrap();
+            stream.write_all(reply.as_ref()).await.unwrap();
         });
         (root, client, server)
     }
 
     #[tokio::test]
     async fn request_uses_bounded_socket_protocol_without_a_process() {
-        let (root, client, server) = command_server("j/clients", "[]".into()).await;
+        let (root, client, server) = command_server("j/clients", "[]").await;
         assert_eq!(client.request("j/clients").await.unwrap(), "[]");
         server.await.unwrap();
         let root = root.path().join("hypr");
@@ -412,42 +412,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_unterminated_events_disconnect_and_receiver_close_cancels_backoff() {
-        let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
-        let (sender, mut events) = mpsc::channel(8);
-        let watcher = tokio::spawn(watch_events_with(client, sender, |event| event));
-        let (mut stream, _) = listener.accept().await.unwrap();
-        assert_eq!(events.recv().await, Some(Event::Connected));
-        stream
-            .write_all(&vec![b'x'; super::MAX_EVENT_BYTES as usize + 1])
-            .await
-            .unwrap();
-        assert_eq!(
-            time::timeout(Duration::from_secs(1), events.recv())
+    async fn event_limits_and_receiver_closure_cancel_reads_and_backoff() {
+        for length in [12, super::MAX_EVENT_BYTES as usize + 1] {
+            let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
+            let (sender, mut events) = mpsc::channel(8);
+            let watcher = tokio::spawn(watch_events_with(client, sender, |event| event));
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(events.recv().await, Some(Event::Connected));
+            stream.write_all(&vec![b'x'; length]).await.unwrap();
+            if length > super::MAX_EVENT_BYTES as usize {
+                assert_eq!(
+                    time::timeout(Duration::from_secs(1), events.recv())
+                        .await
+                        .unwrap(),
+                    Some(Event::Disconnected)
+                );
+            }
+            // Cancel either a partial read or the oversized-frame backoff.
+            drop(events);
+            time::timeout(Duration::from_millis(100), watcher)
                 .await
-                .unwrap(),
-            Some(Event::Disconnected)
-        );
-        drop(events);
-        time::timeout(Duration::from_millis(100), watcher)
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn receiver_closure_cancels_a_partial_event_read() {
-        let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
-        let (sender, mut events) = mpsc::channel(8);
-        let watcher = tokio::spawn(watch_events_with(client, sender, |event| event));
-        let (mut stream, _) = listener.accept().await.unwrap();
-        assert_eq!(events.recv().await, Some(Event::Connected));
-        stream.write_all(b"unfinished>>").await.unwrap();
-        drop(events);
-        time::timeout(Duration::from_millis(100), watcher)
-            .await
-            .unwrap()
-            .unwrap();
+                .unwrap()
+                .unwrap();
+        }
     }
 
     #[tokio::test]
@@ -493,17 +480,11 @@ mod tests {
 
     #[tokio::test]
     async fn command_errors_after_connect_do_not_replay_on_another_instance() {
-        let (root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
+        let (root, client, server) = command_server("dispatch test", [0xff]).await;
         let fallback = root.path().join("hypr/fallback");
         fs::create_dir_all(&fallback).await.unwrap();
         let fallback = tokio::net::UnixListener::bind(fallback.join(COMMAND_SOCKET)).unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut command = String::new();
-            stream.read_to_string(&mut command).await.unwrap();
-            assert_eq!(command, "dispatch test");
-            stream.write_all(&[0xff]).await.unwrap(); // invalid reply after command execution
-        });
+        // Invalid UTF-8 reply after command execution must not trigger failover.
         assert!(client.request("dispatch test").await.is_err());
         server.await.unwrap();
         assert!(

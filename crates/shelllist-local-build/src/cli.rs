@@ -1,15 +1,9 @@
-use std::{ffi::OsString, fs, os::unix::ffi::OsStrExt, path::PathBuf, process::Command};
+use std::{ffi::OsString, os::unix::ffi::OsStrExt, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
 
-use crate::{
-    graph::prepare,
-    lock::prune_lock,
-    nix::{Nix, run},
-    policy::local_path,
-    snapshot::resolve,
-};
+use crate::{command::run, graph::prepare, lock::prune_file, nix::Nix};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,21 +66,7 @@ impl Cli {
                 );
                 Ok(())
             }
-            Action::PruneLock { root, lock } => {
-                let root = resolve(&root)?;
-                let mut names = Vec::new();
-                for (name, spec) in nix.inputs(&root)? {
-                    if local_path(&spec, &root)?.is_some() {
-                        names.push(name);
-                    }
-                }
-                let result = prune_lock(serde_json::from_slice(&fs::read(&lock)?)?, &names)?;
-                fs::write(
-                    lock,
-                    format!("{}\n", serde_json::to_string_pretty(&result)?),
-                )?;
-                Ok(())
-            }
+            Action::PruneLock { root, lock } => prune_file(nix, &root, &lock),
             Action::Check(invocation) => invocation.run(nix, "check", None),
             Action::Build(target) => target.invocation.run(nix, "build", target.attr),
             Action::Develop(target) => target.invocation.run(nix, "develop", target.attr),

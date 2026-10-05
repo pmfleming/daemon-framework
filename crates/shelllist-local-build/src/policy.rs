@@ -31,20 +31,16 @@ pub(crate) fn local_path(spec: &Value, root: &Path) -> Result<Option<PathBuf>> {
     );
     let path = match file.strip_prefix("//") {
         Some(authority) => {
-            let (host, path) = authority
-                .split_once('/')
-                .map_or((authority, String::new()), |(host, path)| {
-                    (host, format!("/{path}"))
-                });
+            let (host, path) = authority.split_at(authority.find('/').unwrap_or(authority.len()));
             ensure!(
                 matches!(host, "" | "localhost"),
                 "local inputs must use current worktrees, not refs/revisions: {url}"
             );
             path
         }
-        None => file.to_owned(),
+        None => file,
     };
-    let decoded = percent_encoding::percent_decode_str(&path).collect::<Vec<_>>();
+    let decoded = percent_encoding::percent_decode_str(path).collect::<Vec<_>>();
     Ok(Some(resolve(&root.join(OsStr::from_bytes(&decoded)))?))
 }
 
@@ -62,14 +58,14 @@ pub(crate) fn merge(target: &mut Inputs, overlay: &Inputs) {
     }
 }
 
-pub(crate) fn nested_inputs(spec: &Value) -> Result<Inputs> {
-    match spec.get("inputs") {
-        None => Ok(Inputs::new()),
-        Some(value) => value
-            .as_object()
-            .cloned()
-            .context("input overrides must be an object"),
-    }
+pub(crate) fn nested_inputs(spec: &Value) -> Result<Option<&Inputs>> {
+    spec.get("inputs")
+        .map(|value| {
+            value
+                .as_object()
+                .context("input overrides must be an object")
+        })
+        .transpose()
 }
 
 fn reject_standalone_hyprland(inputs: &Inputs) -> Result<()> {
@@ -78,7 +74,9 @@ fn reject_standalone_hyprland(inputs: &Inputs) -> Result<()> {
             !matches!(name.as_str(), "hyprlandIpc" | "shelllist-hyprland"),
             "shelllist-hyprland belongs in daemon-framework, not a separate input"
         );
-        reject_standalone_hyprland(&nested_inputs(spec)?)?;
+        if let Some(inputs) = nested_inputs(spec)? {
+            reject_standalone_hyprland(inputs)?;
+        }
     }
     Ok(())
 }
@@ -86,30 +84,7 @@ fn reject_standalone_hyprland(inputs: &Inputs) -> Result<()> {
 pub(crate) fn validate_policy(sources: &Sources, root_inputs: &Inputs) -> Result<()> {
     reject_standalone_hyprland(root_inputs)?;
     for (source, captured) in sources {
-        reject_standalone_hyprland(&captured.inputs)?;
-        let name = source
-            .file_name()
-            .and_then(OsStr::to_str)
-            .unwrap_or_default();
-        if !DAEMONS.contains(&name) {
-            continue;
-        }
-        validate_daemon(name, &captured.directory)?;
-        let framework = local_path(
-            captured
-                .inputs
-                .get("daemonFramework")
-                .unwrap_or(&Value::Null),
-            source,
-        )?;
-        ensure!(
-            framework.as_deref()
-                == source
-                    .parent()
-                    .map(|parent| parent.join("daemon-framework"))
-                    .as_deref(),
-            "{name}: daemonFramework must use the current sibling"
-        );
+        validate_source(source, &captured.directory, &captured.inputs)?;
     }
     let Some(framework) = root_inputs.get("daemon-framework") else {
         return Ok(());
@@ -143,6 +118,31 @@ pub(crate) fn validate_policy(sources: &Sources, root_inputs: &Inputs) -> Result
             );
         }
     }
+    Ok(())
+}
+
+fn validate_source(source: &Path, directory: &Path, inputs: &Inputs) -> Result<()> {
+    reject_standalone_hyprland(inputs)?;
+    let name = source
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+    if !DAEMONS.contains(&name) {
+        return Ok(());
+    }
+    validate_daemon(name, directory)?;
+    let framework = local_path(
+        inputs.get("daemonFramework").unwrap_or(&Value::Null),
+        source,
+    )?;
+    ensure!(
+        framework.as_deref()
+            == source
+                .parent()
+                .map(|parent| parent.join("daemon-framework"))
+                .as_deref(),
+        "{name}: daemonFramework must use the current sibling"
+    );
     Ok(())
 }
 

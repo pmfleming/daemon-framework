@@ -85,7 +85,7 @@ mod tests {
     async fn preference_read_uses_native_bounded_command_transport() {
         let (_root, client, server) = command_server(
             "j/getoption animations:enabled",
-            r#"{"option":"animations:enabled","bool":false}"#.into(),
+            r#"{"option":"animations:enabled","bool":false}"#,
         )
         .await;
         assert!(!client.preferences().await.unwrap().animations_enabled);

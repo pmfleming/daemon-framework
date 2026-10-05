@@ -3,6 +3,7 @@
 //! No checkout, fetch, commit, live lock resolution or service activation occurs.
 
 mod cli;
+mod command;
 mod graph;
 mod lock;
 mod nix;

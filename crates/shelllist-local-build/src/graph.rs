@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -15,7 +16,7 @@ use crate::{
 
 pub(crate) struct Source {
     pub directory: PathBuf,
-    pub inputs: Inputs,
+    pub inputs: Rc<Inputs>,
 }
 pub(crate) type Sources = BTreeMap<PathBuf, Source>;
 
@@ -54,7 +55,7 @@ pub(crate) fn prepare(
         store_sources: BTreeMap::new(),
         overrides: Vec::new(),
     };
-    graph.walk(&root, &Inputs::new(), "", &mut BTreeSet::new())?;
+    graph.walk(&root, None, "", &mut BTreeSet::new())?;
     let source = graph.sources.get(&root).context("root was not captured")?;
     validate_policy(&graph.sources, &source.inputs)?;
     graph.nix.lock(&source.directory, &graph.overrides)?;
@@ -110,7 +111,7 @@ impl<N: Nix> Graph<'_, N> {
             source.to_owned(),
             Source {
                 directory: target,
-                inputs,
+                inputs: Rc::new(inputs),
             },
         );
         Ok(())
@@ -138,7 +139,7 @@ impl<N: Nix> Graph<'_, N> {
     fn walk(
         &mut self,
         source: &Path,
-        overlay: &Inputs,
+        overlay: Option<&Inputs>,
         prefix: &str,
         ancestors: &mut BTreeSet<PathBuf>,
     ) -> Result<()> {
@@ -154,17 +155,20 @@ impl<N: Nix> Graph<'_, N> {
             .context("source was not captured")?
             .inputs
             .clone();
-        merge(&mut inputs, overlay);
-        for (name, spec) in inputs {
+        // Repeated edges share captured inputs; only an overlaid edge copies.
+        if let Some(overlay) = overlay {
+            merge(Rc::make_mut(&mut inputs), overlay);
+        }
+        for (name, spec) in inputs.iter() {
             if spec.get("follows").is_some() {
                 continue;
             }
-            let Some(child) = local_path(&spec, source)? else {
+            let Some(child) = local_path(spec, source)? else {
                 continue;
             };
             self.capture(&child)?;
             let edge = if prefix.is_empty() {
-                name
+                name.clone()
             } else {
                 format!("{prefix}/{name}")
             };
@@ -173,7 +177,7 @@ impl<N: Nix> Graph<'_, N> {
                 edge: edge.clone(),
                 store_path,
             });
-            self.walk(&child, &nested_inputs(&spec)?, &edge, ancestors)?;
+            self.walk(&child, nested_inputs(spec)?, &edge, ancestors)?;
         }
         ancestors.remove(source);
         Ok(())

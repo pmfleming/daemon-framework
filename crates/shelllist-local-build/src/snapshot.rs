@@ -1,14 +1,15 @@
 use std::{
     collections::BTreeSet,
     ffi::OsStr,
-    fs::{self, File, FileTimes},
+    fs::{self, File, FileTimes, Metadata},
     io,
     os::unix::{ffi::OsStrExt, fs::symlink},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use crate::command::output;
+use anyhow::{Context, Result, ensure};
 
 /// Like canonicalize, but permits missing suffixes (including dangling links).
 pub(crate) fn resolve(path: &Path) -> Result<PathBuf> {
@@ -48,21 +49,14 @@ fn resolve_links(path: &Path, depth: usize) -> Result<PathBuf> {
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
-        .arg("-c")
-        .arg(format!("safe.directory={}", root.display()))
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .stderr(Stdio::inherit())
-        .output()
-        .context("run git")?;
-    ensure!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        output.status
-    );
-    Ok(output.stdout)
+    output(
+        Command::new("git")
+            .arg("-c")
+            .arg(format!("safe.directory={}", root.display()))
+            .arg("-C")
+            .arg(root)
+            .args(args),
+    )
 }
 
 pub(crate) fn snapshot(root: &Path, destination: &Path) -> Result<()> {
@@ -96,38 +90,38 @@ pub(crate) fn snapshot(root: &Path, destination: &Path) -> Result<()> {
         };
         let target = destination.join(relative);
         fs::create_dir_all(target.parent().context("tracked file has no parent")?)?;
-        if metadata.is_symlink() {
-            ensure!(
-                resolve(&source)?.starts_with(root),
-                "symlink escapes snapshot: {}",
-                source.display()
-            );
-            symlink(fs::read_link(&source)?, &target)?;
-        } else if metadata.is_file() {
-            copy_file(&source, &target)?;
-            let after = fs::metadata(&source)?;
-            ensure!(
-                (metadata.modified()?, metadata.len()) == (after.modified()?, after.len()),
-                "file changed while snapshotting; retry: {}",
-                source.display()
-            );
-        } else {
-            bail!(
-                "unsupported tracked directory/submodule: {}",
-                source.display()
-            );
-        }
+        ensure!(
+            !metadata.is_symlink() || resolve(&source)?.starts_with(root),
+            "symlink escapes snapshot: {}",
+            source.display()
+        );
+        copy_leaf(&source, &target, &metadata)?;
     }
     Ok(())
 }
 
-fn copy_file(source: &Path, target: &Path) -> Result<()> {
+// Both tracked and already-frozen sources preserve leaf metadata and reject
+// special files. Only the tracked-source caller applies root confinement.
+fn copy_leaf(source: &Path, target: &Path, before: &Metadata) -> Result<()> {
+    if before.is_symlink() {
+        return symlink(fs::read_link(source)?, target).context("copy symlink");
+    }
+    ensure!(
+        before.is_file(),
+        "unsupported snapshot entry: {}",
+        source.display()
+    );
     fs::copy(source, target).with_context(|| format!("copy {}", source.display()))?;
-    let metadata = fs::metadata(source)?;
+    let after = fs::metadata(source)?;
+    ensure!(
+        (before.modified()?, before.len()) == (after.modified()?, after.len()),
+        "file changed while snapshotting; retry: {}",
+        source.display()
+    );
     File::open(target)?.set_times(
         FileTimes::new()
-            .set_accessed(metadata.accessed()?)
-            .set_modified(metadata.modified()?),
+            .set_accessed(after.accessed()?)
+            .set_modified(after.modified()?),
     )?;
     Ok(())
 }
@@ -138,15 +132,11 @@ pub(crate) fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let destination = target.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_symlink() {
-            symlink(fs::read_link(entry.path())?, destination)?;
-        } else if kind.is_dir() {
+        let metadata = entry.metadata()?; // DirEntry does not follow symlinks.
+        if metadata.is_dir() {
             copy_tree(&entry.path(), &destination)?;
-        } else if kind.is_file() {
-            copy_file(&entry.path(), &destination)?;
         } else {
-            bail!("unsupported snapshot entry: {}", entry.path().display());
+            copy_leaf(&entry.path(), &destination, &metadata)?;
         }
     }
     fs::set_permissions(target, fs::metadata(source)?.permissions())?;

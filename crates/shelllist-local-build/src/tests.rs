@@ -13,7 +13,7 @@ use crate::{
     graph::{Source, Sources, prepare},
     lock::prune_lock,
     nix::{Inputs, Nix, Override, lock_command},
-    policy::{local_path, merge, validate_policy},
+    policy::{local_path, merge, nested_inputs, validate_policy},
     snapshot::snapshot,
 };
 
@@ -91,7 +91,7 @@ fn sources(paths: &[&Path]) -> Sources {
                 path.to_path_buf(),
                 Source {
                     directory: path.to_path_buf(),
-                    inputs: definitions(path),
+                    inputs: definitions(path).into(),
                 },
             )
         })
@@ -201,6 +201,8 @@ fn prepared_snapshot_preserves_internal_symlinks() {
     }
     git(&root, &["add", "."]);
     let frozen = repos.path("frozen");
+    fs::set_permissions(root.join("dir/source"), fs::Permissions::from_mode(0o755)).unwrap();
+    let original = fs::metadata(root.join("dir/source")).unwrap();
     snapshot(&root, &frozen).unwrap();
     let mut nix = TestNix::default();
     let result = prepare(&mut nix, &frozen, &repos.path("prepared"), true).unwrap();
@@ -218,6 +220,9 @@ fn prepared_snapshot_preserves_internal_symlinks() {
     );
     assert!(nix.stores.is_empty());
     for tree in [&frozen, prepared] {
+        let copied = fs::metadata(tree.join("dir/source")).unwrap();
+        assert_eq!(copied.modified().unwrap(), original.modified().unwrap());
+        assert_eq!(copied.permissions().mode(), original.permissions().mode());
         for (name, target) in links {
             assert_eq!(fs::read_link(tree.join(name)).unwrap(), Path::new(target));
         }
@@ -266,6 +271,22 @@ fn branch_and_revision_pins_rejected() {
         local_path(&json!({"url": absolute}), repos.0.path()).unwrap(),
         Some(repos.path("project"))
     );
+}
+
+#[test]
+fn nested_overlays_are_borrowed_and_do_not_mutate_shared_inputs() {
+    let spec = json!({"inputs": {"dep": {"follows": "root"}}});
+    let overlay = nested_inputs(&spec).unwrap().unwrap();
+    assert!(std::ptr::eq(overlay, spec["inputs"].as_object().unwrap()));
+    let original = std::rc::Rc::new(inputs(json!({"dep": {"url": "git+file:../dep"}})));
+    let mut effective = original.clone();
+    merge(std::rc::Rc::make_mut(&mut effective), overlay);
+    assert!(original["dep"].get("follows").is_none());
+    assert_eq!(effective["dep"]["follows"], "root");
+    assert!(nested_inputs(&json!({})).unwrap().is_none());
+    for invalid in [Value::Null, json!([]), json!("bad")] {
+        assert!(nested_inputs(&json!({"inputs": invalid})).is_err());
+    }
 }
 
 #[test]
@@ -428,7 +449,7 @@ fn standalone_hyprland_inputs_rejected() {
             "not a separate input",
         );
     }
-    sources.get_mut(&app).unwrap().inputs.insert(
+    std::rc::Rc::make_mut(&mut sources.get_mut(&app).unwrap().inputs).insert(
         "hyprlandIpc".into(),
         json!({"url":"git+file:../shelllist-hyprland"}),
     );

@@ -1,9 +1,6 @@
-use std::{
-    fs,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{fs, path::Path, process::Command};
 
+use crate::command::{output, run};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value};
 
@@ -29,27 +26,6 @@ pub(crate) fn flake_ref(path: &Path) -> Result<String> {
         "path:{}",
         path.to_str().context("flake path is not UTF-8")?
     ))
-}
-
-fn output(command: &mut Command) -> Result<Vec<u8>> {
-    let result = command
-        .stderr(Stdio::inherit())
-        .output()
-        .with_context(|| format!("run {command:?}"))?;
-    ensure!(
-        result.status.success(),
-        "{command:?} failed: {}",
-        result.status
-    );
-    Ok(result.stdout)
-}
-
-pub(crate) fn run(command: &mut Command) -> Result<()> {
-    let status = command
-        .status()
-        .with_context(|| format!("run {command:?}"))?;
-    ensure!(status.success(), "{command:?} failed: {status}");
-    Ok(())
 }
 
 impl Nix for SystemNix {
