@@ -1,95 +1,70 @@
 # daemon-framework
 
-Shared Rust infrastructure for the Shelllist daemon family.
+Shared Rust infrastructure for Shelllist's five domain daemons: `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon` and `nm-daemon`.
 
-## Workspace crates
+## Workspace and boundaries
 
-- `shelllist-daemon-core` — protocol/envelopes, JSONL wire, fixtures, atomic/staged files, bounded reads, and owner-scoped operation bookkeeping.
-- `shelllist-daemon-tokio` — D-Bus/JSONL transport, managed subscriptions, connection-scoped owner monitoring, task groups, bounded blocking lanes, resume detection, event forwarding, and async file helpers.
-- `shelllist-hyprland` — optional Hyprland IPC transport and compositor work-area interpretation shared by `app-daemon` and `bar-daemon`. It is a separate crate, not a dependency of core/Tokio or the other daemons.
-- `shelllist-protocol-js` — build tool that generates frontend constants from daemon-owned protocol registries.
-- `shelllist-local-build` — native `local-build` CLI and source-policy regression tests; development tooling, not a daemon dependency.
+| Crate | Responsibility |
+| --- | --- |
+| `shelllist-daemon-core` | Protocol envelopes, JSONL wire types, fixtures, staged/atomic files, bounded reads and owner-scoped operations |
+| `shelllist-daemon-tokio` | D-Bus/JSONL transport, subscriptions, connection-scoped owner monitoring, task groups, bounded blocking lanes, resume detection and async file helpers |
+| `shelllist-hyprland` | Optional bounded Hyprland IPC, work-area and compositor-preference interpretation |
+| `shelllist-local-build` | Native snapshot/build CLI and source-policy tests; not a daemon dependency |
 
-The Shelllist-owned fuzzy ranking process lives with the frontend. Domain policy and frontend ranking do not belong in this infrastructure workspace.
+`shelllist-protocol-js` is a binary in **shelllist-daemon-core**, not a separate crate. It generates frontend constants from daemon-owned registries.
 
-Domain policy remains in `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon`, and `nm-daemon`. This workspace contains only reusable process infrastructure, platform adapters and services. Hyprland protocol/rule and compositor-preference interpretation belongs in `shelllist-hyprland`; cache/subscriber lifetime stays in `bar-daemon`, and UI placement and animation policy stay in Shelllist. See the [crate documentation](crates/shelllist-hyprland/README.md) for migration provenance.
+Domain schemas, validation, persistence policy and effects stay in their owning daemons; fuzzy ranking and UI policy stay in Shelllist. Hyprland does not become a core/Tokio dependency: app/bar consume its crate directly, bar owns shared cache/subscriber lifetimes, and Shelllist owns placement/animation. See [Hyprland APIs](crates/shelllist-hyprland/README.md) and [server lifecycle guarantees](docs/server-infrastructure.md).
 
-## Server infrastructure
+## Current-source development
 
-See [server infrastructure](docs/server-infrastructure.md) for lifecycle guarantees,
-policy boundaries, migration guidance, and cross-repository deployment steps.
+All five daemons consume one current sibling framework checkout. Cargo uses path dependencies; Nix uses `local-build`, never vendored copies or per-consumer revision pins.
+
+`tools/local-build` bootstraps through Cargo/Rust and requires Git/Nix. The packaged native command includes Git/Nix and needs neither Cargo nor Python. It captures tracked edits once, excludes ignored build products and resolves only a disposable lock. Register new files with `git add` or `git add -N`. Ordinary `nix build`/`flake check` can recreate unwanted local pins.
+
+From this repository:
+
+```sh
+tools/local-build develop .
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+tools/local-build check .
+tools/local-build check ../shelllist --keep-going
+tools/local-build build ../app-daemon
+```
+
+Transport tests require `dbus-daemon`, supplied by the development/check environments. Local-build tests use real Git/filesystem fixtures and mock Nix; after dependencies are available, they require neither network nor a Nix daemon. Check coordinated framework/consumer changes together before deployment; desktop `rebuild` reuses one frozen graph for checks and switching.
+
+### Snapshot and approval API
+
+- `preflight ROOT`: aggregate worktree diagnostics without snapshotting or changing Git tracking. Preparation validates again.
+- `prepare ROOT DESTINATION`: retain the captured graph and print JSON (`flake`, `sources`, `storeSources`). Destination must not exist.
+- `--root-is-snapshot`: copy an already-frozen root; destination must be outside it.
+- `--capture-root`: retain `.approval-root` before lock resolution and return `originalRoot`, so rebuild approval uses the actual captured configuration/lock.
+- `prune-lock ROOT LOCK`: remove local input roots and unreachable nodes from the supplied lock, preserving remote pins.
+
+`check`, `build`, `develop` and `run` clean up their temporary graphs after the child exits. For build/develop/run, place `--attr NAME` before ROOT and forwarded arguments after it. Source overrides are rejected. See [local-build](docs/local-build.md) for contracts and bootstrap details; trusted Nix sources remain part of the deployment trust boundary.
+
+## Nix outputs and caching
+
+The flake exposes `localBuild`, `protocolBindings` (also default), workspace checks and development shells for `x86_64-linux` and `aarch64-linux`. Crane shares compiled dependencies across framework tools/tests. Filtered daemon sources exclude deployment tooling and the local-build crate. Packages expose `rebuildCache` for bounded deployment GC roots; `localBuild.unwrappedProgram` lets integration fixtures intercept Nix without changing production tool resolution.
+
+Pipe a daemon registry JSON document into:
+
+```sh
+tools/local-build run --attr protocolBindings .
+```
 
 ## Routed JSONL clients
 
-The existing `call`, `subscribe`, and `cancel` messages accept optional bridge-local
-`route` metadata. The bridge echoes it on success, domain-error, overload, and
-transport-error **responses** without forwarding it to the domain D-Bus API:
+Calls, subscriptions and cancellations accept optional bridge-local metadata:
 
 ```json
 {"op":"call","id":"view::page","method":"clipboard.history.query","params":{"limit":200},"route":{"consumerId":"view","localId":"page","generation":1,"kind":"call"}}
 ```
 
-`kind` is `call`, `subscription`, `base-subscription`, or `control` and must match
-the request operation. `generation` is the frontend transport generation; the
-frontend rejects responses/events from retired generations. Unrouted clients keep
-their existing response format. Unsolicited transport-error notifications remain
-global and invalidate the connection rather than replaying its requests.
+`kind` must match the operation: `call`, `subscription`, `base-subscription` or `control`. Routes are echoed on responses, including errors, without entering domain D-Bus APIs. Subscription events retain routes, including events buffered before acknowledgement. Frontends reject retired generations; unrouted clients retain their wire format.
 
-Ordinary request addresses live with bounded request tasks, not a long-lived
-routing dictionary. The output actor retains addresses only for live
-subscriptions and attaches their route to subscription events, including events
-buffered before the subscribe reply. Cancellation and connection reset remove
-ownership. Domain operation correlation remains independent of subscription
-routing.
+Request addresses live with bounded tasks, not a permanent dictionary. Routed `release` with kind `control` releases acknowledged subscriptions for its consumer/generation; destroyed consumers must still cancel IDs from late subscribe replies. Closing stdin drains accepted calls and cancels tracked IDs. Failed cancellations retain ownership for cleanup.
 
-`{"op":"release","id":"view::release","route":{"consumerId":"view","localId":"release","generation":1,"kind":"control"}}`
-releases acknowledged subscriptions for that consumer/generation. A frontend
-must still cancel IDs in **late subscribe replies** to a destroyed consumer;
-those replies retain their address. Closing stdin drains accepted calls and
-cancels the remaining tracked IDs. Failed cancellations retain ownership for
-later cleanup.
-
-Admission is bounded before spawning tasks. Overload produces an addressed error
-and is never automatically replayed. Cancellation/release use a separate bounded
-control lane so ordinary call saturation cannot block cleanup.
-
-Deploy routed frontends with rebuilt daemon client binaries. There is deliberately
-no frontend fallback to a per-request JavaScript object table. All Shelllist
-clients use the same current sibling framework, including app-daemon. Never
-introduce a vendored framework copy or a per-consumer framework revision pin.
-
-## Development
-
-**Source policy:** all five daemons consume this current Git worktree. Cargo uses
-sibling paths; Nix development uses the Rust `local-build` CLI (installed as
-`local-build` on the desktop). `tools/local-build` bootstraps it from this checkout
-using Cargo; the packaged binary needs only Git and Nix, not Python or Cargo.
-It snapshots tracked files, including uncommitted edits, once per invocation and resolves only a disposable build graph. New files
-must be Git-added; ignored build products are excluded. Persistent locks select
-third-party dependencies only. Plain `nix build`/`flake check` can recreate local
-pins; do not use them as the co-development entry point.
-
-```bash
-tools/local-build check ../shelllist --keep-going
-tools/local-build build ../app-daemon
-tools/local-build develop .
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-tools/local-build check .
-rqlens measure hotspots
-```
-
-The local-build tests run with `cargo test --workspace` (or
-`cargo test -p shelllist-local-build --locked`). They use real Git/filesystem
-fixtures and mock Nix, so no Nix daemon or network is needed for those tests.
-The CLI retains `prepare`, `prune-lock`, `check`, `build`, `develop`, and `run`;
-put `--attr NAME` before the root and forwarded arguments after it. Replace old
-`python3 tools/local-build.py ...` invocations with `tools/local-build ...`.
-See [local-build](docs/local-build.md) for bootstrap and migration details.
-
-Generate a JavaScript protocol binding by piping a daemon registry to:
-
-```bash
-nix run .#protocolBindings
-```
+Admission is bounded before spawning; cancellation/release have a separate control lane. Overload is never automatically replayed. Global transport-error notifications invalidate the connection. Deploy routed frontends with matching rebuilt daemon clients, not a JavaScript routing-table fallback.
