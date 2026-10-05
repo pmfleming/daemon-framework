@@ -5,6 +5,7 @@ mod work_area_tests;
 
 use std::{
     env,
+    future::Future,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::PathBuf,
     time::Duration,
@@ -13,7 +14,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use tokio::{
     fs,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     sync::mpsc,
     time,
@@ -23,6 +24,8 @@ const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const COMMAND_SOCKET: &str = ".socket.sock";
 const EVENT_SOCKET: &str = ".socket2.sock";
+const MAX_EVENT_BYTES: u64 = 64 * 1024;
+const MAX_REPLY_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -54,16 +57,13 @@ impl Client {
     }
 
     pub async fn request(&self, command: &str) -> Result<String> {
-        let candidates =
-            socket_candidates(&self.roots(), self.signature.as_deref(), COMMAND_SOCKET).await?;
-        time::timeout(IPC_TIMEOUT, async {
-            let stream = connect_candidates(&candidates).await?;
+        bounded_ipc(async {
+            let stream = self.connect(COMMAND_SOCKET).await?;
             // Fail over only while connecting, never replay a command that may
             // already have changed compositor state.
             request_socket(stream, command).await
         })
         .await
-        .context("Hyprland command timed out")?
     }
 
     pub async fn work_areas(
@@ -79,11 +79,13 @@ impl Client {
     }
 
     pub async fn event_socket(&self) -> Result<UnixStream> {
+        bounded_ipc(self.connect(EVENT_SOCKET)).await
+    }
+
+    async fn connect(&self, socket: &str) -> Result<UnixStream> {
         let candidates =
-            socket_candidates(&self.roots(), self.signature.as_deref(), EVENT_SOCKET).await?;
-        time::timeout(IPC_TIMEOUT, connect_candidates(&candidates))
-            .await
-            .context("Hyprland event connection timed out")?
+            socket_candidates(&self.roots(), self.signature.as_deref(), socket).await?;
+        connect_candidates(&candidates).await
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -95,6 +97,14 @@ impl Client {
             vec![runtime, temporary]
         }
     }
+}
+
+// One budget includes discovery, connection and (for commands) the entire
+// write/read exchange. Timing out drops the owned stream and pending discovery.
+async fn bounded_ipc<T>(operation: impl Future<Output = Result<T>>) -> Result<T> {
+    time::timeout(IPC_TIMEOUT, operation)
+        .await
+        .context("Hyprland IPC timed out")?
 }
 
 // Prefer the requested instance in either root, then sorted fallback instances
@@ -198,18 +208,41 @@ async fn forward_events<T>(
     map: &impl Fn(Event) -> T,
 ) -> Result<(), mpsc::error::SendError<T>> {
     sender.send(map(Event::Connected)).await?;
-    let mut lines = BufReader::new(stream).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    let mut reader = BufReader::new(stream);
+    while let Ok(Some(line)) = read_event(&mut reader).await {
         sender.send(map(Event::Message(line))).await?;
     }
     sender.send(map(Event::Disconnected)).await
+}
+
+// Bound an unterminated line too: read_line/lines would otherwise grow forever.
+// No idle timeout: a healthy compositor is allowed to emit no events.
+async fn read_event(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<String>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_EVENT_BYTES + 1)
+        .read_until(b'\n', &mut bytes)
+        .await?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_EVENT_BYTES,
+        "Hyprland event is too large"
+    );
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    Ok(Some(String::from_utf8(bytes)?))
 }
 
 async fn request_socket(mut stream: UnixStream, command: &str) -> Result<String> {
     stream.write_all(command.as_bytes()).await?;
     stream.shutdown().await?;
     let mut response = String::new();
-    const MAX_REPLY_BYTES: u64 = 16 * 1024 * 1024;
     stream
         .take(MAX_REPLY_BYTES + 1)
         .read_to_string(&mut response)
@@ -292,6 +325,129 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ipc_deadline_cancels_pending_operations() {
+        let marker = std::sync::Arc::new(());
+        let held = marker.clone();
+        let started = time::Instant::now();
+        let error = super::bounded_ipc(async move {
+            let _held = held;
+            std::future::pending::<anyhow::Result<()>>().await
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert_eq!(time::Instant::now() - started, super::IPC_TIMEOUT);
+        assert_eq!(std::sync::Arc::strong_count(&marker), 1);
+    }
+
+    #[tokio::test]
+    async fn request_deadline_includes_waiting_for_a_reply() {
+        let (_root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
+        let request = tokio::spawn(async move { client.request("j/clients").await });
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut command = String::new();
+        stream.read_to_string(&mut command).await.unwrap();
+        assert_eq!(command, "j/clients");
+        time::pause(); // discovery/connection finished; peer deliberately never replies
+        assert!(
+            request
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+    }
+
+    #[tokio::test]
+    async fn replies_and_event_lines_have_explicit_size_and_encoding_bounds() {
+        let (_root, client, server) =
+            command_server("j/clients", "x".repeat(super::MAX_REPLY_BYTES as usize + 1)).await;
+        assert!(
+            client
+                .request("j/clients")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("too large")
+        );
+        server.await.unwrap();
+        for (mut input, expected) in [
+            (b"event>>1\n".as_slice(), Some("event>>1")),
+            (b"event>>2\r\n", Some("event>>2")),
+            (b"partial", Some("partial")),
+            (b"\n", Some("")),
+            (b"", None),
+        ] {
+            assert_eq!(
+                super::read_event(&mut input).await.unwrap().as_deref(),
+                expected
+            );
+        }
+        assert!(super::read_event(&mut b"\xff\n".as_slice()).await.is_err());
+        let mut boundary = vec![b'x'; super::MAX_EVENT_BYTES as usize];
+        *boundary.last_mut().unwrap() = b'\n';
+        assert!(
+            super::read_event(&mut boundary.as_slice())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        for terminated in [false, true] {
+            let mut oversized = vec![b'x'; super::MAX_EVENT_BYTES as usize + 1];
+            if terminated {
+                *oversized.last_mut().unwrap() = b'\n';
+            }
+            assert!(
+                super::read_event(&mut oversized.as_slice())
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("too large")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_unterminated_events_disconnect_and_receiver_close_cancels_backoff() {
+        let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
+        let (sender, mut events) = mpsc::channel(8);
+        let watcher = tokio::spawn(watch_events_with(client, sender, |event| event));
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(events.recv().await, Some(Event::Connected));
+        stream
+            .write_all(&vec![b'x'; super::MAX_EVENT_BYTES as usize + 1])
+            .await
+            .unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap(),
+            Some(Event::Disconnected)
+        );
+        drop(events);
+        time::timeout(Duration::from_millis(100), watcher)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn receiver_closure_cancels_a_partial_event_read() {
+        let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
+        let (sender, mut events) = mpsc::channel(8);
+        let watcher = tokio::spawn(watch_events_with(client, sender, |event| event));
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(events.recv().await, Some(Event::Connected));
+        stream.write_all(b"unfinished>>").await.unwrap();
+        drop(events);
+        time::timeout(Duration::from_millis(100), watcher)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
