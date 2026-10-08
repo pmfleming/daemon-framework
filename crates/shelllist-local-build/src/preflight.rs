@@ -1,7 +1,7 @@
 //! Diagnostics only. Snapshotting repeats validation after authentication.
 use crate::{
     nix::{Inputs, Nix},
-    policy::{local_path, merge, nested_inputs},
+    policy::{local_path, nested_inputs, overlaid},
     snapshot::{resolve, validate_worktree},
 };
 use anyhow::{Result, ensure};
@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 #[derive(Debug, Serialize)]
@@ -23,7 +24,7 @@ pub(crate) fn preflight(nix: &mut impl Nix, root: &Path) -> Result<Report> {
         walked: BTreeSet::new(),
         problems: Vec::new(),
     };
-    scan.walk(&resolve(root)?, None, &mut BTreeSet::new());
+    scan.walk(&resolve(root)?, None, &mut BTreeSet::new())?;
     ensure!(
         scan.problems.is_empty(),
         "Local worktree preflight failed:\n\n{}\n\nAdd or ignore untracked files explicitly; rebuild never changes Git tracking.",
@@ -36,65 +37,68 @@ pub(crate) fn preflight(nix: &mut impl Nix, root: &Path) -> Result<Report> {
 
 struct Scan<'a, N> {
     nix: &'a mut N,
-    definitions: BTreeMap<PathBuf, Option<Inputs>>,
+    definitions: BTreeMap<PathBuf, Option<Rc<Inputs>>>,
     walked: BTreeSet<(PathBuf, String)>,
     problems: Vec<String>,
 }
 impl<N: Nix> Scan<'_, N> {
-    fn walk(&mut self, source: &Path, overlay: Option<&Inputs>, ancestors: &mut BTreeSet<PathBuf>) {
+    fn inputs(&mut self, source: &Path) -> Option<Rc<Inputs>> {
+        let problems = &mut self.problems;
+        self.definitions
+            .entry(source.to_owned())
+            .or_insert_with(|| {
+                inspect(problems, source.display(), validate_worktree(source));
+                inspect(problems, source.display(), self.nix.inputs(source)).map(Rc::new)
+            })
+            .clone()
+    }
+
+    fn walk(
+        &mut self,
+        source: &Path,
+        overlay: Option<&Inputs>,
+        ancestors: &mut BTreeSet<PathBuf>,
+    ) -> Result<()> {
         if ancestors.contains(source) {
             self.problems
                 .push(format!("Local input cycle at {}", source.display()));
-            return;
+            return Ok(());
         }
         // Each repository is inspected once, but distinct follows overlays must
         // still be walked so no nested local worktree escapes diagnostics.
-        let key = (
-            source.to_owned(),
-            serde_json::to_string(&overlay).expect("JSON inputs"),
-        );
+        let key = (source.to_owned(), serde_json::to_string(&overlay)?);
         if !self.walked.insert(key) {
-            return;
+            return Ok(());
         }
-        if let std::collections::btree_map::Entry::Vacant(entry) =
-            self.definitions.entry(source.to_owned())
-        {
-            if let Err(error) = validate_worktree(source) {
-                self.problems
-                    .push(format!("Cannot inspect {}: {error:#}", source.display()));
-            }
-            let inputs = match self.nix.inputs(source) {
-                Ok(inputs) => Some(inputs),
-                Err(error) => {
-                    self.problems
-                        .push(format!("Cannot inspect {}: {error:#}", source.display()));
-                    None
-                }
-            };
-            entry.insert(inputs);
-        }
-        let Some(mut inputs) = self.definitions.get(source).cloned().flatten() else {
-            return;
+        let Some(inputs) = self.inputs(source) else {
+            return Ok(());
         };
-        if let Some(overlay) = overlay {
-            merge(&mut inputs, overlay);
-        }
+        let inputs = overlaid(inputs, overlay);
         ancestors.insert(source.to_owned());
-        for (name, spec) in inputs {
+        for (name, spec) in inputs.iter() {
             if spec.get("follows").is_some() {
                 continue;
             }
-            let edge =
-                (|| -> Result<_> { Ok((local_path(&spec, source)?, nested_inputs(&spec)?)) })();
-            match edge {
-                Ok((Some(child), overlay)) => self.walk(&child, overlay, ancestors),
-                Ok((None, _)) => {}
-                Err(error) => self.problems.push(format!(
-                    "Cannot inspect {}/{name}: {error:#}",
-                    source.display()
-                )),
+            let edge = local_path(spec, source).and_then(|child| Ok((child, nested_inputs(spec)?)));
+            if let Some((Some(child), overlay)) = inspect(
+                &mut self.problems,
+                format_args!("{}/{name}", source.display()),
+                edge,
+            ) {
+                self.walk(&child, overlay, ancestors)?;
             }
         }
         ancestors.remove(source);
+        Ok(())
     }
+}
+
+fn inspect<T>(
+    problems: &mut Vec<String>,
+    source: impl std::fmt::Display,
+    result: Result<T>,
+) -> Option<T> {
+    result
+        .inspect_err(|error| problems.push(format!("Cannot inspect {source}: {error:#}")))
+        .ok()
 }

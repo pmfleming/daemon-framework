@@ -153,12 +153,12 @@ impl<P: CorrelationPolicy> OutputState<P> {
         &mut self,
         tracked: Option<TrackedId>,
         route: Option<ClientRoute>,
-    ) -> Vec<(String, Value)> {
+    ) -> VecDeque<(String, String, Value)> {
         let Some(tracked) = tracked else {
-            return Vec::new();
+            return VecDeque::new();
         };
         if self.suppressed_ids.contains(&tracked.id) {
-            return Vec::new();
+            return VecDeque::new();
         }
         let pending = self.take_pending(&tracked.id);
         let active_route = self.active_ids.entry(tracked.id).or_default();
@@ -190,15 +190,12 @@ impl<P: CorrelationPolicy> OutputState<P> {
         self.pending_events.push_back((id, stream, event));
     }
 
-    fn take_pending(&mut self, id: &str) -> Vec<(String, Value)> {
+    fn take_pending(&mut self, id: &str) -> VecDeque<(String, String, Value)> {
         let (matching, retained) = std::mem::take(&mut self.pending_events)
             .into_iter()
             .partition(|(event_id, _, _)| event_id == id);
         self.pending_events = retained;
         matching
-            .into_iter()
-            .map(|(_, stream, event)| (stream, event))
-            .collect()
     }
 
     fn suppress(&mut self, id: String) {
@@ -381,7 +378,7 @@ where
     emit_line(writer, &line).await?;
     for message in pending
         .into_iter()
-        .filter_map(|(stream, event)| state.accept_event(stream, event))
+        .filter_map(|(_, stream, event)| state.accept_event(stream, event))
     {
         emit_line(writer, &message).await?;
     }
@@ -411,7 +408,7 @@ mod tests {
 
     use super::{
         BasicCorrelation, CorrelationPolicy, OutputCommand, OutputState, TrackedKind,
-        run_output_actor, spawn_output_actor_with_writer,
+        run_output_actor,
     };
 
     struct Operations;
@@ -443,23 +440,6 @@ mod tests {
                 .response_id(&json!({"data": {"subscription": {"id": 42}}}))
                 .is_none()
         );
-    }
-
-    async fn render(commands: Vec<OutputCommand>) -> Result<Vec<Value>> {
-        let (writer, mut reader) = duplex(4096);
-        let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 4, writer);
-        for command in commands {
-            output.send(command).await?;
-        }
-        drop(output);
-        task.await??;
-
-        let mut text = String::new();
-        reader.read_to_string(&mut text).await?;
-        text.lines()
-            .map(serde_json::from_str)
-            .collect::<serde_json::Result<_>>()
-            .map_err(Into::into)
     }
 
     #[tokio::test]
@@ -500,32 +480,6 @@ mod tests {
 
         assert_eq!(lines[0]["kind"], "response");
         assert_eq!(lines[1]["kind"], "event");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn drops_late_events_after_cancellation() -> Result<()> {
-        let lines = render(vec![
-            OutputCommand::Response {
-                id: "subscribe".into(),
-                result: Ok(json!({ "data": { "subscription": { "id": "sub-1" } } })),
-                cancelled_request_id: None,
-                route: None,
-            },
-            OutputCommand::Response {
-                id: "cancel".into(),
-                result: Ok(json!({ "cancelled": "sub-1" })),
-                cancelled_request_id: Some("sub-1".into()),
-                route: None,
-            },
-            OutputCommand::Event {
-                stream: "things.changed".into(),
-                event: json!({ "subscription_id": "sub-1" }),
-            },
-        ])
-        .await?;
-
-        assert_eq!(lines.len(), 2);
         Ok(())
     }
 }

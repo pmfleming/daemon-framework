@@ -13,7 +13,7 @@ use crate::{
     graph::{Source, Sources, prepare},
     lock::prune_lock,
     nix::{Inputs, Nix, Override, lock_command},
-    policy::{local_path, merge, nested_inputs, validate_policy},
+    policy::{local_path, merge, nested_inputs, overlaid, validate_policy},
     snapshot::snapshot,
 };
 
@@ -112,7 +112,9 @@ struct TestNix {
 impl Nix for TestNix {
     fn inputs(&mut self, root: &Path) -> Result<Inputs> {
         self.reads.push(root.into());
-        Ok(definitions(root))
+        Ok(serde_json::from_slice(&fs::read(
+            root.join("inputs.json"),
+        )?)?)
     }
     fn add_source(&mut self, source: &Path, gc_root: &Path) -> Result<String> {
         self.stores.push((source.into(), gc_root.into()));
@@ -279,8 +281,9 @@ fn nested_overlays_are_borrowed_and_do_not_mutate_shared_inputs() {
     let overlay = nested_inputs(&spec).unwrap().unwrap();
     assert!(std::ptr::eq(overlay, spec["inputs"].as_object().unwrap()));
     let original = std::rc::Rc::new(inputs(json!({"dep": {"url": "git+file:../dep"}})));
-    let mut effective = original.clone();
-    merge(std::rc::Rc::make_mut(&mut effective), overlay);
+    let unchanged = overlaid(original.clone(), None);
+    assert!(std::rc::Rc::ptr_eq(&original, &unchanged));
+    let effective = overlaid(unchanged, Some(overlay));
     assert!(original["dep"].get("follows").is_none());
     assert_eq!(effective["dep"]["follows"], "root");
     assert!(nested_inputs(&json!({})).unwrap().is_none());
@@ -535,7 +538,7 @@ fn preflight_aggregates_worktrees_ignores_follows_and_does_not_write() {
         "root",
         json!({
             "sibling": {"url": "git+file:../sibling"},
-            "again": {"url": "git+file:../sibling"},
+            "again": {"url": "git+file:../sibling", "inputs": {} },
             "followed": {"follows": "sibling", "url": "git+file:../missing"}
         }),
         &[],
@@ -565,6 +568,15 @@ fn preflight_aggregates_worktrees_ignores_follows_and_does_not_write() {
     fs::remove_file(sibling.join("image.png")).unwrap();
     let report = crate::preflight::preflight(&mut nix, &root).unwrap();
     assert_eq!(report.repositories.len(), 2);
+    // Failed evaluations are cached too, even for distinct edge overlays.
+    nix.reads.clear();
+    fs::write(sibling.join("inputs.json"), "invalid JSON").unwrap();
+    let error = crate::preflight::preflight(&mut nix, &root)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error.matches("Cannot inspect").count(), 1, "{error}");
+    assert!(error.contains(sibling.to_str().unwrap()), "{error}");
+    assert_eq!(nix.reads.len(), 2);
 }
 
 #[test]

@@ -3,6 +3,7 @@ use std::{
     fs,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -42,6 +43,14 @@ pub(crate) fn local_path(spec: &Value, root: &Path) -> Result<Option<PathBuf>> {
     };
     let decoded = percent_encoding::percent_decode_str(path).collect::<Vec<_>>();
     Ok(Some(resolve(&root.join(OsStr::from_bytes(&decoded)))?))
+}
+
+/// Repeated edges share captured inputs; only an overlaid edge copies.
+pub(crate) fn overlaid(mut inputs: Rc<Inputs>, overlay: Option<&Inputs>) -> Rc<Inputs> {
+    if let Some(overlay) = overlay {
+        merge(Rc::make_mut(&mut inputs), overlay);
+    }
+    inputs
 }
 
 pub(crate) fn merge(target: &mut Inputs, overlay: &Inputs) {

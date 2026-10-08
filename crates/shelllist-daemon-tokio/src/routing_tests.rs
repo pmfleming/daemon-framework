@@ -14,12 +14,12 @@ fn route(consumer: &str, generation: u64, kind: RouteKind) -> ClientRoute {
     }
 }
 
-fn subscription(id: &str, owner: ClientRoute) -> OutputCommand {
+fn subscription(id: &str, owner: impl Into<Option<ClientRoute>>) -> OutputCommand {
     OutputCommand::Response {
         id: "subscribe".into(),
         result: Ok(json!({ "data": { "subscription": { "id": id } } })),
         cancelled_request_id: None,
-        route: Some(owner),
+        route: owner.into(),
     }
 }
 
@@ -44,7 +44,7 @@ impl<P: CorrelationPolicy> Output<P> {
     async fn send(&mut self, command: OutputCommand) -> Result<()> {
         emit_command(&mut self.bytes, &mut self.state, command).await
     }
-    async fn subscribe(&mut self, id: &str, owner: ClientRoute) -> Result<()> {
+    async fn subscribe(&mut self, id: &str, owner: impl Into<Option<ClientRoute>>) -> Result<()> {
         self.send(subscription(id, owner)).await
     }
     fn lines(&self) -> Vec<Value> {
@@ -111,36 +111,47 @@ async fn early_events_follow_the_addressed_reply_and_stay_owner_scoped() -> Resu
 
 #[tokio::test]
 async fn cancellation_failure_retains_ownership_success_and_reset_remove_it() -> Result<()> {
-    let mut output = Output::new(BasicCorrelation);
-    output
-        .subscribe("sub-a", route("a", 1, RouteKind::Subscription))
-        .await?;
-    output
-        .send(OutputCommand::Response {
-            id: "cancel".into(),
-            result: Err("temporarily unavailable".into()),
-            cancelled_request_id: None,
-            route: Some(route("a", 1, RouteKind::Control)),
-        })
-        .await?;
-    assert_eq!(output.state.owned_ids("a", 1), ["sub-a"]);
-    output
-        .send(OutputCommand::Cancelled("sub-a".into()))
-        .await?;
-    assert!(output.state.active_ids.is_empty());
-    let length = output.bytes.len();
-    output.send(event("sub-a")).await?;
-    assert_eq!(
-        output.bytes.len(),
-        length,
-        "late cancelled events must be suppressed"
-    );
-    output
-        .subscribe("sub-b", route("b", 2, RouteKind::Subscription))
-        .await?;
-    output.send(OutputCommand::ResetCorrelation).await?;
-    assert!(output.state.active_ids.is_empty());
-    assert!(output.state.pending_events.is_empty());
+    for routed in [false, true] {
+        let mut output = Output::new(BasicCorrelation);
+        output
+            .subscribe(
+                "sub-a",
+                routed.then(|| route("a", 1, RouteKind::Subscription)),
+            )
+            .await?;
+        output
+            .send(OutputCommand::Response {
+                id: "cancel".into(),
+                result: Err("temporarily unavailable".into()),
+                cancelled_request_id: None,
+                route: routed.then(|| route("a", 1, RouteKind::Control)),
+            })
+            .await?;
+        assert_eq!(output.state.active_ids(), ["sub-a"]);
+        assert_eq!(output.state.owned_ids("a", 1).len(), usize::from(routed));
+        output
+            .send(OutputCommand::Response {
+                id: "cancel".into(),
+                result: Ok(json!({"cancelled": "sub-a"})),
+                cancelled_request_id: Some("sub-a".into()),
+                route: routed.then(|| route("a", 1, RouteKind::Control)),
+            })
+            .await?;
+        assert!(output.state.active_ids.is_empty());
+        let length = output.bytes.len();
+        output.send(event("sub-a")).await?;
+        assert_eq!(
+            output.bytes.len(),
+            length,
+            "late cancelled events must be suppressed"
+        );
+        output
+            .subscribe("sub-b", route("b", 2, RouteKind::Subscription))
+            .await?;
+        output.send(OutputCommand::ResetCorrelation).await?;
+        assert!(output.state.active_ids.is_empty());
+        assert!(output.state.pending_events.is_empty());
+    }
     Ok(())
 }
 

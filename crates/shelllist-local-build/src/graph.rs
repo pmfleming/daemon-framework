@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::{
     nix::{Inputs, Nix, Override, flake_ref},
-    policy::{local_path, merge, nested_inputs, validate_policy},
+    policy::{local_path, nested_inputs, overlaid, validate_policy},
     snapshot::{copy_tree, resolve, snapshot},
 };
 
@@ -172,16 +172,11 @@ impl<N: Nix> Graph<'_, N> {
             source.display()
         );
         self.capture(source)?;
-        let mut inputs = self
+        let captured = self
             .sources
             .get(source)
-            .context("source was not captured")?
-            .inputs
-            .clone();
-        // Repeated edges share captured inputs; only an overlaid edge copies.
-        if let Some(overlay) = overlay {
-            merge(Rc::make_mut(&mut inputs), overlay);
-        }
+            .context("source was not captured")?;
+        let inputs = overlaid(Rc::clone(&captured.inputs), overlay);
         for (name, spec) in inputs.iter() {
             if spec.get("follows").is_some() {
                 continue;

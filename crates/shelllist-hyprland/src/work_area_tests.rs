@@ -23,6 +23,12 @@ fn text(parts: &[Value; 5]) -> String {
 fn margins(parts: &[Value; 5], monitor: &str) -> Value {
     serde_json::to_value(parse_work_areas(&text(parts)).unwrap().get(monitor)).unwrap()
 }
+fn assert_margins(parts: &[Value; 5], monitor: &str, [left, top, right, bottom]: [f64; 4]) {
+    assert_eq!(
+        margins(parts, monitor),
+        json!({"left": left, "top": top, "right": right, "bottom": bottom})
+    );
+}
 fn assert_rule(parts: &mut [Value; 5], selector: &str, monitor: &str, top: f64) {
     parts[2] = json!([{"workspaceString":selector,"gapsOut":[0]}]);
     assert_eq!(margins(parts, monitor)["top"], top, "{selector}");
@@ -30,26 +36,14 @@ fn assert_rule(parts: &mut [Value; 5], selector: &str, monitor: &str, top: f64) 
 #[test]
 fn logical_reservations_css_gaps_and_ordered_rules() {
     let mut parts = fixture();
-    assert_eq!(
-        margins(&parts, "eDP-1"),
-        json!({"left":2.0,"top":53.0,"right":2.0,"bottom":2.0})
-    );
+    assert_margins(&parts, "eDP-1", [2.0, 53.0, 2.0, 2.0]);
     parts[2] = json!([{"workspaceString":"r[1-4]","gapsOut":[9,10,11,12]},{"workspaceString":"1","gapsOut":[3,4,5,6]},{"workspaceString":"1","borderSize":10},{"workspaceString":"1","gapsOut":"invalid"},{"workspaceString":"3","gapsOut":[7]}]);
-    assert_eq!(
-        margins(&parts, "eDP-1"),
-        json!({"left":6.0,"top":54.0,"right":4.0,"bottom":5.0})
-    );
-    assert_eq!(
-        margins(&parts, "DP-1"),
-        json!({"left":31.0,"top":87.0,"right":17.0,"bottom":27.0})
-    );
+    assert_margins(&parts, "eDP-1", [6.0, 54.0, 4.0, 5.0]);
+    assert_margins(&parts, "DP-1", [31.0, 87.0, 17.0, 27.0]);
     parts[2] = json!([]);
     parts[4]["css"] = json!("4 8 12 16");
     parts[0][0]["reserved"] = json!([7, 92, 13, 28]);
-    assert_eq!(
-        margins(&parts, "eDP-1"),
-        json!({"left":23.0,"top":96.0,"right":21.0,"bottom":40.0})
-    );
+    assert_margins(&parts, "eDP-1", [23.0, 96.0, 21.0, 40.0]);
     assert!(margins(&parts, "missing").is_null());
 }
 #[test]
@@ -179,6 +173,27 @@ fn directional_selection_keeps_first_tie_and_skips_disabled_monitors() {
     assert_eq!(margins(&parts, "DP-2")["top"], 80.0);
     parts[0][0]["focused"] = json!(false);
     assert_eq!(margins(&parts, "DP-2")["top"], 82.0);
+}
+
+#[test]
+fn directional_selection_normalizes_axes_after_rotation_and_scaling() {
+    for (direction, x, y, transform) in [
+        ("l", -1920, 0, 0),
+        ("r", 1536, 0, 0),
+        ("u", 0, -1080, 0),
+        ("t", 0, -1080, 0),
+        ("d", 0, 960, 0),
+        ("b", 0, 960, 0),
+        ("r", 960, 0, 1),
+        ("u", 0, -1920, 1),
+    ] {
+        let mut parts = fixture();
+        parts[0][0]["transform"] = json!(transform);
+        parts[0][1]["transform"] = json!(transform);
+        parts[0][1]["x"] = json!(x);
+        parts[0][1]["y"] = json!(y);
+        assert_rule(&mut parts, &format!("m[{direction}]"), "DP-1", 80.0);
+    }
 }
 
 #[tokio::test]

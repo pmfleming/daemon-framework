@@ -135,42 +135,37 @@ fn parse(text: &str) -> Result<Snapshot> {
         gaps,
     })
 }
-fn monitor_box(m: &Monitor) -> [f64; 4] {
-    let (width, height) = if m.transform % 2 == 0 {
-        (m.width, m.height)
+// Normalize the search axis to x so every direction shares the same edge and
+// overlap calculation. Odd transforms rotate physical dimensions before scaling.
+fn monitor_box(m: &Monitor, direction: &str) -> [f64; 4] {
+    let mut size = [m.width, m.height];
+    if m.transform % 2 != 0 {
+        size.swap(0, 1);
+    }
+    let [width, height] = size.map(|length| (length / m.scale).round());
+    if matches!(direction, "l" | "r") {
+        [m.x, m.y, width, height]
     } else {
-        (m.height, m.width)
-    };
-    [
-        m.x,
-        m.y,
-        (width / m.scale).round(),
-        (height / m.scale).round(),
-    ]
+        [m.y, m.x, height, width]
+    }
 }
 fn directional<'a>(direction: &str, monitors: &'a [Monitor]) -> Option<&'a Monitor> {
     let focused = monitors.iter().find(|m| m.focused)?;
-    let [x, y, w, h] = monitor_box(focused);
+    let [x, y, w, h] = monitor_box(focused, direction);
     monitors
         .iter()
         .filter(|m| m.name != focused.name && !m.disabled)
         .filter_map(|monitor| {
-            let [tx, ty, tw, th] = monitor_box(monitor);
-            let distance = match direction {
-                "l" => x - tx - tw,
-                "r" => x + w - tx,
-                "u" | "t" => y - ty - th,
-                _ => y + h - ty,
+            let [tx, ty, tw, th] = monitor_box(monitor, direction);
+            let distance = if matches!(direction, "l" | "u" | "t") {
+                x - tx - tw
+            } else {
+                x + w - tx
             };
             if distance.abs() >= 2.0 {
                 return None;
             }
-            let overlap = if matches!(direction, "l" | "r") {
-                (y + h).min(ty + th) - y.max(ty)
-            } else {
-                (x + w).min(tx + tw) - x.max(tx)
-            }
-            .max(0.0);
+            let overlap = ((y + h).min(ty + th) - y.max(ty)).max(0.0);
             Some((monitor, overlap))
         })
         // min_by retains the first equal candidate, unlike max_by.
