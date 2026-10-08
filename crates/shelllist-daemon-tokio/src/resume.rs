@@ -80,19 +80,17 @@ pub async fn monitor_resumes(sender: watch::Sender<u64>) {
 }
 
 async fn logind_events(sender: mpsc::Sender<()>) {
-    while !sender.is_closed() {
-        tokio::select! {
-            _ = sender.closed() => return,
-            result = logind_connection(&sender) => {
-                if let Err(error) = result {
-                    tracing::debug!(%error, "logind resume stream unavailable; clock fallback remains active");
-                }
-            }
+    let reconnect = async {
+        while let Err(error) = logind_connection(&sender).await {
+            tracing::debug!(%error, "logind resume stream unavailable; clock fallback remains active");
+            sleep(Duration::from_secs(3)).await;
         }
-        tokio::select! {
-            _ = sender.closed() => return,
-            _ = sleep(Duration::from_secs(3)) => {},
-        }
+    };
+    // One cancellation boundary covers connection, signal reads, sends and backoff.
+    tokio::select! {
+        biased;
+        _ = sender.closed() => {},
+        _ = reconnect => {},
     }
 }
 
@@ -117,7 +115,7 @@ async fn logind_connection(sender: &mpsc::Sender<()>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResumeDetector, monitor_resumes, suspend_offset};
+    use super::{ResumeDetector, logind_events, monitor_resumes, suspend_offset};
     use std::time::Duration;
     use tokio::sync::watch;
     #[test]
@@ -141,10 +139,15 @@ mod tests {
         assert!(suspend_offset().is_some());
     }
     #[tokio::test]
-    async fn monitor_stops_without_consumers() {
+    async fn monitors_stop_without_consumers() {
         let (sender, receiver) = watch::channel(0);
         drop(receiver);
         tokio::time::timeout(Duration::from_secs(1), monitor_resumes(sender))
+            .await
+            .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        tokio::time::timeout(Duration::from_secs(1), logind_events(sender))
             .await
             .unwrap();
     }
