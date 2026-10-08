@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
-use crate::{graph::Sources, nix::Inputs, snapshot::resolve};
+use crate::{nix::Inputs, snapshot::resolve};
 
 const DAEMONS: &[&str] = &[
     "app-daemon",
@@ -77,7 +77,7 @@ pub(crate) fn nested_inputs(spec: &Value) -> Result<Option<&Inputs>> {
         .transpose()
 }
 
-fn reject_standalone_hyprland(inputs: &Inputs) -> Result<()> {
+pub(crate) fn reject_standalone_hyprland(inputs: &Inputs) -> Result<()> {
     for (name, spec) in inputs {
         ensure!(
             !matches!(name.as_str(), "hyprlandIpc" | "shelllist-hyprland"),
@@ -90,19 +90,12 @@ fn reject_standalone_hyprland(inputs: &Inputs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_policy(sources: &Sources, root_inputs: &Inputs) -> Result<()> {
-    reject_standalone_hyprland(root_inputs)?;
-    for (source, captured) in sources {
-        validate_source(source, &captured.directory, &captured.inputs)?;
-    }
+pub(crate) fn validate_root(root_inputs: &Inputs, framework_captured: bool) -> Result<()> {
     let Some(framework) = root_inputs.get("daemon-framework") else {
         return Ok(());
     };
     ensure!(
-        local_path(framework, Path::new("/"))?.is_some()
-            && sources
-                .keys()
-                .any(|source| source.file_name() == Some(OsStr::new("daemon-framework"))),
+        local_path(framework, Path::new("/"))?.is_some() && framework_captured,
         "the shared root framework must be a current local checkout"
     );
     for name in DAEMONS {
@@ -130,7 +123,7 @@ pub(crate) fn validate_policy(sources: &Sources, root_inputs: &Inputs) -> Result
     Ok(())
 }
 
-fn validate_source(source: &Path, directory: &Path, inputs: &Inputs) -> Result<()> {
+pub(crate) fn validate_source(source: &Path, directory: &Path, inputs: &Inputs) -> Result<()> {
     reject_standalone_hyprland(inputs)?;
     let name = source
         .file_name()

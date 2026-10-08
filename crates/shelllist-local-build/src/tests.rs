@@ -10,10 +10,10 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use crate::{
-    graph::{Source, Sources, prepare},
+    graph::{Source, Sources, prepare, validate_policy},
     lock::prune_lock,
     nix::{Inputs, Nix, Override, lock_command},
-    policy::{local_path, merge, nested_inputs, overlaid, validate_policy},
+    policy::{local_path, merge, nested_inputs, overlaid},
     snapshot::snapshot,
 };
 

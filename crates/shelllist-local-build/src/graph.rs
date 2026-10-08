@@ -10,7 +10,10 @@ use serde::Serialize;
 
 use crate::{
     nix::{Inputs, Nix, Override, flake_ref},
-    policy::{local_path, nested_inputs, overlaid, validate_policy},
+    policy::{
+        local_path, nested_inputs, overlaid, reject_standalone_hyprland, validate_root,
+        validate_source,
+    },
     snapshot::{copy_tree, resolve, snapshot},
 };
 
@@ -19,6 +22,20 @@ pub(crate) struct Source {
     pub inputs: Rc<Inputs>,
 }
 pub(crate) type Sources = BTreeMap<PathBuf, Source>;
+
+// Graph traversal stays here; policy operates only on individual source facts.
+pub(crate) fn validate_policy(sources: &Sources, root_inputs: &Inputs) -> Result<()> {
+    reject_standalone_hyprland(root_inputs)?;
+    for (source, captured) in sources {
+        validate_source(source, &captured.directory, &captured.inputs)?;
+    }
+    validate_root(
+        root_inputs,
+        sources
+            .keys()
+            .any(|source| source.ends_with("daemon-framework")),
+    )
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
