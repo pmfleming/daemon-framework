@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use shelllist_daemon_core::{ClientRoute, RouteKind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::sink;
 
 use super::{BasicCorrelation, CorrelationPolicy, OutputCommand, OutputState, emit_command};
@@ -155,8 +156,13 @@ async fn cancellation_failure_retains_ownership_success_and_reset_remove_it() ->
     Ok(())
 }
 
-struct TerminalSubscription;
+#[derive(Default)]
+struct TerminalSubscription(AtomicUsize);
 impl CorrelationPolicy for TerminalSubscription {
+    fn event_id(&self, stream: &str, event: &Value) -> Option<String> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        BasicCorrelation.event_id(stream, event)
+    }
     fn is_terminal(&self, _stream: &str, _event: &Value) -> bool {
         true
     }
@@ -165,7 +171,7 @@ impl CorrelationPolicy for TerminalSubscription {
 #[tokio::test]
 async fn terminal_events_keep_their_route_before_retiring_ownership() -> Result<()> {
     for buffered in [false, true] {
-        let mut output = Output::new(TerminalSubscription);
+        let mut output = Output::new(TerminalSubscription::default());
         if buffered {
             output.send(event("sub-a")).await?;
             // A terminal event also suppresses later events already in the buffer.
@@ -182,6 +188,11 @@ async fn terminal_events_keep_their_route_before_retiring_ownership() -> Result<
         assert!(output.state.active_ids.is_empty());
         assert!(output.state.pending_events.is_empty());
         assert!(output.state.suppressed_ids.contains("sub-a"));
+        assert_eq!(
+            output.state.policy.0.load(Ordering::Relaxed),
+            if buffered { 3 } else { 1 },
+            "extract identity once per received event, never again during delivery"
+        );
     }
     Ok(())
 }

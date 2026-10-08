@@ -46,6 +46,7 @@ pub trait CorrelationPolicy: Send + Sync + 'static {
         })
     }
 
+    /// Event identity is retained through buffering and terminal cleanup.
     fn event_id(&self, _stream: &str, event: &Value) -> Option<String> {
         event
             .get("subscription_id")
@@ -169,14 +170,14 @@ impl<P: CorrelationPolicy> OutputState<P> {
         pending
     }
 
-    fn accept_event(&mut self, stream: String, event: Value) -> Option<Value> {
-        match self.policy.event_id(&stream, &event) {
+    fn accept_event(&mut self, id: Option<String>, stream: String, event: Value) -> Option<Value> {
+        match id {
             Some(id) if self.suppressed_ids.contains(&id) => None,
             Some(id) if !self.active_ids.contains_key(&id) => {
                 self.buffer(id, stream, event);
                 None
             }
-            _ => Some(self.event_message(&stream, event)),
+            id => Some(self.event_message(&stream, event, id)),
         }
     }
 
@@ -235,12 +236,8 @@ impl<P: CorrelationPolicy> OutputState<P> {
             .collect()
     }
 
-    fn event_message(&mut self, stream: &str, event: Value) -> Value {
-        let terminal = self
-            .policy
-            .is_terminal(stream, &event)
-            .then(|| self.policy.event_id(stream, &event))
-            .flatten();
+    fn event_message(&mut self, stream: &str, event: Value, id: Option<String>) -> Value {
+        let terminal = id.filter(|_| self.policy.is_terminal(stream, &event));
         // Subscription ownership is independent of domain operation correlation.
         let route = event
             .get("subscription_id")
@@ -336,7 +333,10 @@ where
             state.cancelled(id);
             None
         }
-        OutputCommand::Event { stream, event } => state.accept_event(stream, event),
+        OutputCommand::Event { stream, event } => {
+            let id = state.policy.event_id(&stream, &event);
+            state.accept_event(id, stream, event)
+        }
         OutputCommand::ProtocolError(error) => Some(protocol_error_message(error)),
         OutputCommand::TransportError(error) => Some(transport_error_message(error)),
         OutputCommand::ResetCorrelation => {
@@ -378,7 +378,7 @@ where
     emit_line(writer, &line).await?;
     for message in pending
         .into_iter()
-        .filter_map(|(_, stream, event)| state.accept_event(stream, event))
+        .filter_map(|(id, stream, event)| state.accept_event(Some(id), stream, event))
     {
         emit_line(writer, &message).await?;
     }
