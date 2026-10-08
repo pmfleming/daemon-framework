@@ -283,6 +283,8 @@ fn nested_overlays_are_borrowed_and_do_not_mutate_shared_inputs() {
     let original = std::rc::Rc::new(inputs(json!({"dep": {"url": "git+file:../dep"}})));
     let unchanged = overlaid(original.clone(), None);
     assert!(std::rc::Rc::ptr_eq(&original, &unchanged));
+    let unchanged = overlaid(unchanged, Some(&Inputs::new()));
+    assert!(std::rc::Rc::ptr_eq(&original, &unchanged));
     let effective = overlaid(unchanged, Some(overlay));
     assert!(original["dep"].get("follows").is_none());
     assert_eq!(effective["dep"]["follows"], "root");

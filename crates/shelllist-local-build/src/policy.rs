@@ -45,9 +45,9 @@ pub(crate) fn local_path(spec: &Value, root: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(resolve(&root.join(OsStr::from_bytes(&decoded)))?))
 }
 
-/// Repeated edges share captured inputs; only an overlaid edge copies.
+/// Repeated edges share captured inputs; only a nonempty overlay can copy.
 pub(crate) fn overlaid(mut inputs: Rc<Inputs>, overlay: Option<&Inputs>) -> Rc<Inputs> {
-    if let Some(overlay) = overlay {
+    if let Some(overlay) = overlay.filter(|overlay| !overlay.is_empty()) {
         merge(Rc::make_mut(&mut inputs), overlay);
     }
     inputs
