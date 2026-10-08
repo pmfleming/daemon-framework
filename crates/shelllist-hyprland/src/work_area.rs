@@ -84,27 +84,22 @@ struct Snapshot {
 }
 
 fn css(value: &Value) -> Option<[f64; 4]> {
-    let parts: Vec<f64> = if let Some(text) = value.as_str() {
-        text.split_whitespace()
-            .map(str::parse)
-            .collect::<Result<_, _>>()
-            .ok()?
+    if let Some(text) = value.as_str() {
+        expand_css(text.split_whitespace().map(|part| part.parse().ok()))
     } else {
-        value
-            .as_array()?
-            .iter()
-            .map(Value::as_f64)
-            .collect::<Option<_>>()?
-    };
-    if !(1..=4).contains(&parts.len()) || parts.iter().any(|value| !value.is_finite()) {
-        return None;
+        expand_css(value.as_array()?.iter().map(Value::as_f64))
     }
-    Some([
-        parts[0],
-        *parts.get(1).unwrap_or(&parts[0]),
-        *parts.get(2).unwrap_or(&parts[0]),
-        *parts.get(3).or(parts.get(1)).unwrap_or(&parts[0]),
-    ])
+}
+
+// CSS shorthand: top, right (or top), bottom (or top), left (or right).
+// Inspect at most five components; malformed or oversized input never allocates.
+fn expand_css(mut parts: impl Iterator<Item = Option<f64>>) -> Option<[f64; 4]> {
+    let top = parts.next()??;
+    let right = parts.next().unwrap_or(Some(top))?;
+    let bottom = parts.next().unwrap_or(Some(top))?;
+    let left = parts.next().unwrap_or(Some(right))?;
+    let gaps = [top, right, bottom, left];
+    (parts.next().is_none() && gaps.iter().all(|value| value.is_finite())).then_some(gaps)
 }
 fn parse(text: &str) -> Result<Snapshot> {
     ensure!(

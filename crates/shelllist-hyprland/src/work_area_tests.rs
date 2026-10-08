@@ -47,6 +47,37 @@ fn logical_reservations_css_gaps_and_ordered_rules() {
     assert!(margins(&parts, "missing").is_null());
 }
 #[test]
+fn css_shorthand_accepts_one_to_four_finite_numbers_only() {
+    let mut parts = fixture();
+    for (text, array, expected) in [
+        ("1", json!([1]), [1.0, 52.0, 1.0, 1.0]),
+        ("1 2", json!([1, 2]), [2.0, 52.0, 2.0, 1.0]),
+        ("1 2 3", json!([1, 2, 3]), [2.0, 52.0, 2.0, 3.0]),
+        ("1 2 3 4", json!([1, 2, 3, 4]), [4.0, 52.0, 2.0, 3.0]),
+    ] {
+        for css in [json!(text), array] {
+            parts[4]["css"] = css;
+            assert_margins(&parts, "eDP-1", expected);
+        }
+    }
+    for invalid in [
+        json!(""),
+        json!([]),
+        json!("1 bad"),
+        json!([1, null]),
+        json!("NaN"),
+        json!("1 inf"),
+        json!("1 2 3 -inf"),
+        json!("1 2 3 4 5"),
+        json!([1, 2, 3, 4, 5]),
+        json!(true),
+    ] {
+        parts[4]["css"] = invalid;
+        assert!(parse_work_areas(&text(&parts)).is_err());
+    }
+}
+
+#[test]
 fn smart_gaps_and_group_visibility_filters() {
     let mut parts = fixture();
     for selector in [
