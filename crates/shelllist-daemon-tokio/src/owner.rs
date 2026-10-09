@@ -39,13 +39,12 @@ impl OwnerLossMonitor {
                 let (stopped, state) = watch::channel(false);
                 let task = spawn_named("D-Bus-owner-monitor", async move {
                     while let Some(message) = changes.next().await {
-                        let Ok((name, old, new)) =
-                            message.body().deserialize::<(String, String, String)>()
-                        else {
+                        let body = message.body();
+                        let Ok((name, old, new)) = body.deserialize::<(&str, &str, &str)>() else {
                             continue;
                         };
                         if name.starts_with(':') && !old.is_empty() && new.is_empty() {
-                            let _ = publisher.send(name);
+                            let _ = publisher.send(name.to_owned());
                         }
                     }
                     stopped.send_replace(true);
@@ -161,10 +160,9 @@ pub(crate) async fn wait_for_name_replacement(
 ) -> Result<()> {
     let mut changes = owner_changes(connection).await?;
     while let Some(message) = changes.next().await {
-        let (name, old, new): (String, String, String) = message
-            .body()
-            .deserialize()
-            .context("decode owner change")?;
+        let body = message.body();
+        let (name, old, new): (&str, &str, &str) =
+            body.deserialize().context("decode owner change")?;
         if name == watched_name && !old.is_empty() && old != new {
             return Ok(());
         }

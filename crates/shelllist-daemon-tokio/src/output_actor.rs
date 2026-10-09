@@ -116,13 +116,8 @@ impl OutputHandle {
 
     async fn query_ids(&self, owner: Option<(String, u64)>) -> Vec<String> {
         let (reply, response) = oneshot::channel();
-        if self
-            .send(OutputCommand::ActiveIds { owner, reply })
-            .await
-            .is_err()
-        {
-            return Vec::new();
-        }
+        // A failed send drops the reply sender, so the same receive handles closure.
+        let _ = self.send(OutputCommand::ActiveIds { owner, reply }).await;
         response.await.unwrap_or_default()
     }
 }
@@ -440,6 +435,17 @@ mod tests {
                 .response_id(&json!({"data": {"subscription": {"id": 42}}}))
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn id_query_returns_empty_when_actor_has_stopped() {
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let output = super::OutputHandle {
+            priority_sender: sender.clone(),
+            event_sender: sender,
+        };
+        assert!(output.active_ids().await.is_empty());
     }
 
     #[tokio::test]

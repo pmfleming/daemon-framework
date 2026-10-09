@@ -53,12 +53,11 @@ impl ApiError {
             ("code".into(), Value::String(self.code)),
             ("message".into(), Value::String(self.message)),
         ]);
-        if let Some(retryable) = self.retryable {
-            value.insert("retryable".into(), Value::Bool(retryable));
-        }
-        if let Some(details) = self.details {
-            value.insert("details".into(), details);
-        }
+        value.extend(
+            self.retryable
+                .map(|flag| ("retryable".into(), Value::Bool(flag))),
+        );
+        value.extend(self.details.map(|details| ("details".into(), details)));
         Value::Object(value)
     }
 }
@@ -76,22 +75,17 @@ pub enum Correlation<'a> {
 
 #[must_use]
 pub fn success(api: ApiIdentity, data: Value) -> Value {
-    json!({
-        "protocol": api.protocol,
-        "version": api.version,
-        "ok": true,
-        "data": data,
-    })
+    let mut response = json!({ "protocol": api.protocol, "version": api.version, "ok": true });
+    // json! serializes Value by reference; insert it directly to retain its storage.
+    response["data"] = data;
+    response
 }
 
 #[must_use]
 pub fn error(api: ApiIdentity, error: ApiError) -> Value {
-    json!({
-        "protocol": api.protocol,
-        "version": api.version,
-        "ok": false,
-        "error": error.into_value(),
-    })
+    let mut response = json!({ "protocol": api.protocol, "version": api.version, "ok": false });
+    response["error"] = error.into_value();
+    response
 }
 
 /// Builds the common event fields and merges daemon-owned payload fields.
@@ -131,11 +125,31 @@ pub fn event_envelope(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    use super::{ApiError, ApiIdentity, Correlation, error, event_envelope};
+    use super::{ApiError, ApiIdentity, Correlation, error, event_envelope, success};
+    use crate::{event_message, response_message};
 
     const API: ApiIdentity = ApiIdentity::new("test-api", 1);
+
+    #[test]
+    fn owned_payloads_keep_their_storage_through_api_and_wire_envelopes() {
+        let data = json!({"text": "owned payload"});
+        let storage = data["text"].as_str().unwrap().as_ptr();
+        let check = |data: &Value| {
+            let text = data["text"].as_str().unwrap();
+            assert_eq!(text, "owned payload");
+            assert_eq!(text.as_ptr(), storage, "payload was copied");
+        };
+        let api = success(API, data);
+        check(&api["data"]);
+        let failure = error(API, ApiError::new("failed", "no").with_details(api));
+        check(&failure["error"]["details"]["data"]);
+        let response = response_message("id", failure);
+        check(&response["response"]["error"]["details"]["data"]);
+        let event = event_message("stream", response);
+        check(&event["event"]["response"]["error"]["details"]["data"]);
+    }
 
     #[test]
     fn optional_error_fields_are_absent_until_requested() {

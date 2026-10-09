@@ -23,25 +23,23 @@ fn resolve_links(path: &Path, depth: usize) -> Result<PathBuf> {
         match component {
             Component::ParentDir => {
                 resolved.pop();
+                continue;
             }
-            Component::CurDir => {}
-            _ => {
-                resolved.push(component);
-                match fs::read_link(&resolved) {
-                    Ok(target) => {
-                        resolved.pop();
-                        resolved = resolve_links(&resolved.join(target), depth + 1)?;
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
-                        ) => {}
-                    Err(error) => {
-                        return Err(error)
-                            .with_context(|| format!("resolve {}", resolved.display()));
-                    }
-                }
+            Component::CurDir => continue,
+            _ => resolved.push(component),
+        }
+        match fs::read_link(&resolved) {
+            Ok(target) => {
+                resolved.pop();
+                resolved = resolve_links(&resolved.join(target), depth + 1)?;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
+                ) => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("resolve {}", resolved.display()));
             }
         }
     }

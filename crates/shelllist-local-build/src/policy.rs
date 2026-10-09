@@ -67,6 +67,13 @@ pub(crate) fn merge(target: &mut Inputs, overlay: &Inputs) {
     }
 }
 
+/// Follows edges reuse another input; their URL and nested overrides are not traversed.
+pub(crate) fn direct_inputs(inputs: &Inputs) -> impl Iterator<Item = (&String, &Value)> {
+    inputs
+        .iter()
+        .filter(|(_, spec)| spec.get("follows").is_none())
+}
+
 pub(crate) fn nested_inputs(spec: &Value) -> Result<Option<&Inputs>> {
     spec.get("inputs")
         .map(|value| {

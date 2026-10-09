@@ -1,7 +1,7 @@
 //! Diagnostics only. Snapshotting repeats validation after authentication.
 use crate::{
     nix::{Inputs, Nix},
-    policy::{local_path, nested_inputs, overlaid},
+    policy::{direct_inputs, local_path, nested_inputs, overlaid},
     snapshot::{resolve, validate_worktree},
 };
 use anyhow::{Result, ensure};
@@ -75,10 +75,7 @@ impl<N: Nix> Scan<'_, N> {
         };
         let inputs = overlaid(inputs, overlay);
         ancestors.insert(source.to_owned());
-        for (name, spec) in inputs.iter() {
-            if spec.get("follows").is_some() {
-                continue;
-            }
+        for (name, spec) in direct_inputs(&inputs) {
             let edge = local_path(spec, source).and_then(|child| Ok((child, nested_inputs(spec)?)));
             if let Some((Some(child), overlay)) = inspect(
                 &mut self.problems,

@@ -89,12 +89,10 @@ fn smart_gaps_and_group_visibility_filters() {
     ] {
         assert_rule(&mut parts, selector, "eDP-1", 51.0);
     }
-    parts[2] = json!([{"workspaceString":"w[t1]","gapsOut":[0,0,0,0]}]);
     parts[3][1]["floating"] = json!(false);
-    assert_eq!(margins(&parts, "eDP-1")["top"], 53.0);
+    assert_rule(&mut parts, "w[t1]", "eDP-1", 53.0);
     parts[3][1]["grouped"] = json!(["b", "a"]);
-    parts[2] = json!([{"workspaceString":"w[tg1]","gapsOut":[0,0,0,0]}]);
-    assert_eq!(margins(&parts, "eDP-1")["top"], 51.0);
+    assert_rule(&mut parts, "w[tg1]", "eDP-1", 51.0);
     parts[3][1]["floating"] = json!(true);
     parts[3][1]["pinned"] = json!(true);
     parts[3][1]["visible"] = json!(false);
@@ -160,11 +158,10 @@ fn named_special_monitor_and_malformed_selectors() {
     ] {
         assert_rule(&mut parts, selector, "DP-1", 80.0);
     }
-    parts[2] = json!([{"workspaceString":"m[r]","gapsOut":[0,0,0,0]}]);
     parts[0][1]["x"] = json!(1538);
-    assert_eq!(margins(&parts, "DP-1")["top"], 82.0);
+    assert_rule(&mut parts, "m[r]", "DP-1", 82.0);
     parts[0][1]["x"] = json!(1537);
-    assert_eq!(margins(&parts, "DP-1")["top"], 80.0);
+    assert_rule(&mut parts, "m[r]", "DP-1", 80.0);
     for selector in [
         "r[1-4] junk",
         "w[bad]",
@@ -173,6 +170,8 @@ fn named_special_monitor_and_malformed_selectors() {
         "m[current]]",
         "m[current]w[2",
         "mm[current]",
+        "[current]",
+        "µ[current]",
     ] {
         assert_rule(&mut parts, selector, "eDP-1", 53.0);
     }
@@ -197,8 +196,7 @@ fn directional_selection_keeps_first_tie_and_skips_disabled_monitors() {
     other["name"] = json!("DP-2");
     other["id"] = json!(2);
     parts[0].as_array_mut().unwrap().push(other);
-    parts[2] = json!([{"workspaceString":"m[r]","gapsOut":[0]}]);
-    assert_eq!(margins(&parts, "DP-1")["top"], 80.0);
+    assert_rule(&mut parts, "m[r]", "DP-1", 80.0);
     assert_eq!(margins(&parts, "DP-2")["top"], 82.0);
     parts[0][1]["disabled"] = json!(true);
     assert_eq!(margins(&parts, "DP-2")["top"], 80.0);
@@ -260,6 +258,10 @@ fn parses_adjacent_json_and_rejects_missing_or_invalid_documents() {
         "not running",
         "[] [] [] [] {}",
         "[null] [] [] [] {\"css\":\"2\"}",
+        "[] [] [] []",
+        "[] [] [] [] {\"css\":\"2\"} {}",
+        "[] [] [] [] {\"css\":\"2\"} trailing",
+        "[] [{\"id\":1,\"name\":\"1\",\"name\":\"two\"}] [] [] {\"css\":\"2\"}",
     ] {
         assert!(parse_work_areas(invalid).is_err());
     }

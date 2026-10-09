@@ -11,8 +11,8 @@ use serde::Serialize;
 use crate::{
     nix::{Inputs, Nix, Override, flake_ref},
     policy::{
-        local_path, nested_inputs, overlaid, reject_standalone_hyprland, validate_root,
-        validate_source,
+        direct_inputs, local_path, nested_inputs, overlaid, reject_standalone_hyprland,
+        validate_root, validate_source,
     },
     snapshot::{copy_tree, resolve, snapshot},
 };
@@ -194,10 +194,7 @@ impl<N: Nix> Graph<'_, N> {
             .get(source)
             .context("source was not captured")?;
         let inputs = overlaid(Rc::clone(&captured.inputs), overlay);
-        for (name, spec) in inputs.iter() {
-            if spec.get("follows").is_some() {
-                continue;
-            }
+        for (name, spec) in direct_inputs(&inputs) {
             let Some(child) = local_path(spec, source)? else {
                 continue;
             };

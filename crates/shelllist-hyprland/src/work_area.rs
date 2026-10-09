@@ -106,16 +106,16 @@ fn parse(text: &str) -> Result<Snapshot> {
         text.len() <= 16 * 1024 * 1024,
         "Hyprland geometry reply too large"
     );
-    let mut docs = serde_json::Deserializer::from_str(text)
-        .into_iter::<Value>()
-        .collect::<Result<Vec<_>, _>>()?;
-    ensure!(docs.len() == 5, "Incomplete Hyprland geometry snapshot");
+    // Decode the fixed batch directly, without a second JSON tree for each document.
+    let mut docs = serde_json::Deserializer::from_str(text);
+    let monitors: Vec<Monitor> = Deserialize::deserialize(&mut docs)?;
+    let workspaces = Deserialize::deserialize(&mut docs)?;
+    let rules = Deserialize::deserialize(&mut docs)?;
+    let clients = Deserialize::deserialize(&mut docs)?;
+    let options = Value::deserialize(&mut docs)?;
+    docs.end()?;
     let gaps =
-        css(&docs[4]["css"]).ok_or_else(|| anyhow::anyhow!("Missing Hyprland outer gaps"))?;
-    let clients = serde_json::from_value(docs[3].take())?;
-    let rules = serde_json::from_value(docs[2].take())?;
-    let workspaces = serde_json::from_value(docs[1].take())?;
-    let monitors: Vec<Monitor> = serde_json::from_value(docs[0].take())?;
+        css(&options["css"]).ok_or_else(|| anyhow::anyhow!("Missing Hyprland outer gaps"))?;
     ensure!(
         monitors.iter().all(|m| m.scale.is_finite()
             && m.scale > 0.0
@@ -182,11 +182,11 @@ fn monitor_matches(selector: &str, monitor: &Monitor, monitors: &[Monitor]) -> b
             return false;
         };
         let length = monitors.len() as i64;
-        return monitors[((index as i64 + delta % length + length) % length) as usize].name
+        return monitors[(index as i64 + delta % length).rem_euclid(length) as usize].name
             == monitor.name;
     }
     if let Ok(id) = selector.parse::<u64>() {
-        return monitor.id >= 0 && monitor.id as u64 == id;
+        return u64::try_from(monitor.id) == Ok(id);
     }
     if let Some(description) = selector.strip_prefix("desc:") {
         let short = format!("{} {} {}", monitor.make, monitor.model, monitor.serial);
@@ -276,7 +276,7 @@ fn selector_integer(value: &str) -> Option<i64> {
     }
 }
 fn term(
-    kind: char,
+    kind: &str,
     value: &str,
     workspace: &Workspace,
     monitor: &Monitor,
@@ -284,25 +284,25 @@ fn term(
 ) -> bool {
     let integer = selector_integer(value);
     match kind {
-        'r' => {
+        "r" => {
             value.contains('-') && range(value).is_some_and(|range| range.contains(&workspace.id))
         }
-        's' => {
+        "s" => {
             integer.is_none_or(|value| (workspace.id < -1 && workspace.id > -1337) == (value != 0))
         }
-        'n' => match value.split_once(':') {
+        "n" => match value.split_once(':') {
             Some(("s", prefix)) => workspace.name.starts_with(prefix),
             Some(("e", suffix)) => workspace.name.ends_with(suffix),
             _ => integer.is_none_or(|value| i64::from(workspace.id <= -1337) == value),
         },
-        'm' => monitor_matches(value, monitor, &snapshot.monitors),
-        'w' => {
+        "m" => monitor_matches(value, monitor, &snapshot.monitors),
+        "w" => {
             let (flags, count) = window_selector(value);
             range(count).is_some_and(|range| {
                 range.contains(&(window_count(flags, workspace, &snapshot.clients) as i64))
             })
         }
-        'f' => fullscreen_matches(value, workspace, &snapshot.clients),
+        "f" => fullscreen_matches(value, workspace, &snapshot.clients),
         _ => false,
     }
 }
@@ -347,10 +347,7 @@ fn matches(selector: &str, workspace: &Workspace, monitor: &Monitor, snapshot: &
         let Some((kind, value)) = clause.trim_start().split_once('[') else {
             return false;
         };
-        let [kind] = kind.as_bytes() else {
-            return false;
-        };
-        term(char::from(*kind), value, workspace, monitor, snapshot)
+        term(kind, value, workspace, monitor, snapshot)
     })
 }
 fn insets(snapshot: &Snapshot) -> BTreeMap<String, Insets> {

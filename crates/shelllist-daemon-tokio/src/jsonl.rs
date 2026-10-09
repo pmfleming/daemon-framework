@@ -471,8 +471,7 @@ async fn drain_calls(calls: &mut JoinSet<()>, timeout: Option<Duration>) {
     {
         return;
     }
-    calls.abort_all();
-    while calls.join_next().await.is_some() {}
+    calls.shutdown().await;
 }
 
 async fn drain_all(calls: &mut JoinSet<()>) {

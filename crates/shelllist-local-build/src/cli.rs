@@ -73,23 +73,14 @@ impl Cli {
                 destination,
                 root_is_snapshot,
                 capture_root,
-            } => {
-                println!(
-                    "{}",
-                    serde_json::to_string(&prepare_with_capture(
-                        nix,
-                        &root,
-                        &destination,
-                        root_is_snapshot,
-                        capture_root
-                    )?)?
-                );
-                Ok(())
-            }
-            Action::Preflight { root } => {
-                println!("{}", serde_json::to_string(&preflight(nix, &root)?)?);
-                Ok(())
-            }
+            } => print_report(prepare_with_capture(
+                nix,
+                &root,
+                &destination,
+                root_is_snapshot,
+                capture_root,
+            )?),
+            Action::Preflight { root } => print_report(preflight(nix, &root)?),
             Action::PruneLock { root, lock } => prune_file(nix, &root, &lock),
             Action::Check(invocation) => invocation.run(nix, "check", None),
             Action::Build(target) => target.invocation.run(nix, "build", target.attr),
@@ -97,6 +88,11 @@ impl Cli {
             Action::Run(target) => target.invocation.run(nix, "run", target.attr),
         }
     }
+}
+
+fn print_report(report: impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string(&report)?);
+    Ok(())
 }
 
 fn validate_args(args: &[OsString]) -> Result<()> {
@@ -170,18 +166,14 @@ mod tests {
     use clap::Parser;
     use std::ffi::OsString;
 
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("local-build").chain(args.iter().copied())).unwrap()
+    }
+
     #[test]
     fn preserves_subcommands_attributes_and_passthrough_arguments() {
         for action in ["check", "build", "develop", "run"] {
-            let cli = Cli::try_parse_from([
-                "local-build",
-                action,
-                ".",
-                "--",
-                "--keep-going",
-                "two words",
-            ])
-            .unwrap();
+            let cli = parse(&[action, ".", "--", "--keep-going", "two words"]);
             let invocation = match cli.command {
                 Action::Check(invocation) => invocation,
                 Action::Build(target) | Action::Develop(target) | Action::Run(target) => {
@@ -200,29 +192,13 @@ mod tests {
             );
             assert!(args.contains(&std::ffi::OsStr::new("--no-update-lock-file")));
         }
-        let cli = Cli::try_parse_from([
-            "local-build",
-            "build",
-            "--attr",
-            "materialColors",
-            ".",
-            "--no-link",
-        ])
-        .unwrap();
+        let cli = parse(&["build", "--attr", "materialColors", ".", "--no-link"]);
         let Action::Build(target) = cli.command else {
             panic!("wrong action")
         };
         assert_eq!(target.attr.as_deref(), Some("materialColors"));
         assert_eq!(target.invocation.parts().unwrap().1, ["--no-link"]);
-        let cli = Cli::try_parse_from([
-            "local-build",
-            "run",
-            ".",
-            "--help",
-            "--attr",
-            "child-option",
-        ])
-        .unwrap();
+        let cli = parse(&["run", ".", "--help", "--attr", "child-option"]);
         let Action::Run(target) = cli.command else {
             panic!("wrong action")
         };

@@ -101,7 +101,9 @@ pub fn addressed_message(mut message: Value, route: Option<&ClientRoute>) -> Val
 
 #[must_use]
 pub fn response_message(id: &str, response: Value) -> Value {
-    json!({ "kind": "response", "id": id, "ok": true, "response": response })
+    let mut message = json!({ "kind": "response", "id": id, "ok": true });
+    message["response"] = response;
+    message
 }
 
 #[must_use]
@@ -111,7 +113,9 @@ pub fn response_error_message(id: &str, error: impl Into<String>) -> Value {
 
 #[must_use]
 pub fn event_message(stream: &str, event: Value) -> Value {
-    json!({ "kind": "event", "stream": stream, "event": event })
+    let mut message = json!({ "kind": "event", "stream": stream });
+    message["event"] = event;
+    message
 }
 
 #[must_use]
