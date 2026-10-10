@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `shelllist-hyprland::monitor` for typed, syntax-validated Lua monitor commands. Explicit enable/disable and mirror-reset semantics are shared by bar-daemon's manual layout and automatic docking paths; policy, persistence, safety checks and observed confirmation remain daemon-owned.
+
 - Replace the Python local-build utility and its tests with the `shelllist-local-build` Rust workspace crate. The native CLI preserves source-policy and JSON/command contracts, with 21 Rust regression tests (including all 13 former Python scenarios). Use `tools/local-build` or the rebuilt installed `local-build`; the checkout launcher requires Cargo, while the packaged binary only needs Git/Nix. Nix checks, CI, and active sibling entrypoints now use the native tool.
 
 - Share operation/subscription response correlation through `CorrelationPolicy::operation_id`, and add `OwnedOperations::drain` for clone-free bulk claims.

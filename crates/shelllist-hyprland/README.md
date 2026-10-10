@@ -1,6 +1,6 @@
 # shelllist-hyprland
 
-Bounded Hyprland IPC discovery, command, and event transport shared by Shelllist's Rust daemons.
+Bounded Hyprland IPC discovery, command/event transport and typed compositor adapters shared by Shelllist's Rust daemons.
 
 This crate lives in the `daemon-framework` workspace. `app-daemon` and
 `bar-daemon` consume `../daemon-framework/crates/shelllist-hyprland` directly;
@@ -53,6 +53,32 @@ are accepted; missing, malformed, contradictory or wrong-option replies fail
 instead of guessing an enabled default. `preferences::preference_event` identifies
 config reloads. bar-daemon owns the shared cache, failure retry and subscription;
 Shelllist retains environment overrides and animation presentation policy.
+
+### Monitor commands
+
+`monitor::command(output, Rule)` encodes a validated Lua monitor request without
+sending it. `Rule::Disable` explicitly sets `disabled = true`; `Rule::Enable`
+always sets `disabled = false`, because `hl.monitor` merges into the existing
+rule. Supplying mode/geometry alone cannot re-enable a previously disabled output.
+
+Enabled rules use typed `Mode::Preferred` / `Mode::Exact("WIDTHxHEIGHT@RATE[Hz]")`
+and `Position::Auto` / `Position::Exact { x, y }`. Scale must be finite and positive;
+transforms use the compositor's 0–7 enum. `transform: None` preserves the old rule's
+transform; `Some(0)` explicitly resets it. `mirror: ""` explicitly clears mirroring;
+a nonempty value names the source output. Exact output/mirror identifiers accept
+only ASCII letters, digits, hyphens and underscores, never selectors or executable
+Lua. Exact modes retain their precision and lose only the optional `Hz` suffix.
+
+Pass the result to the existing `Client::request`; there is no new transport,
+implicit retry, state cache or persistence. An `ok` reply acknowledges the command,
+not an observed hardware transition. The framework owns encoding, syntax checks
+and merge-semantics regression tests, including a private command-socket test.
+
+bar-daemon maps both manual layout settings and automatic laptop restoration into
+these rules. It retains connector eligibility, advertised-mode checks, domain
+scale/position limits, topology and mirror validation, last-screen protection,
+docking policy, serialized effects, persistent layouts, Preview/Keep/revert and
+observation-based confirmation. Its integration tests keep exercising those guards.
 
 Other domain models remain in their owning daemons. Shelllist keeps QScreen size,
 pixel clamping, window placement and presentation-specific layer rules.

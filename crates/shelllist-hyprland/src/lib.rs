@@ -1,3 +1,4 @@
+pub mod monitor;
 pub mod preferences;
 pub mod work_area;
 #[cfg(test)]

@@ -8,7 +8,7 @@ Shared Rust infrastructure for Shelllist's five domain daemons: `app-daemon`, `b
 | --- | --- |
 | `shelllist-daemon-core` | Protocol envelopes, JSONL wire types, fixtures, staged/atomic files, bounded reads and owner-scoped operations |
 | `shelllist-daemon-tokio` | D-Bus/JSONL transport, subscriptions, connection-scoped owner monitoring, task groups, bounded blocking lanes, resume detection and async file helpers |
-| `shelllist-hyprland` | Optional bounded Hyprland IPC, work-area and compositor-preference interpretation |
+| `shelllist-hyprland` | Optional bounded Hyprland IPC, typed monitor-command encoding, work-area and compositor-preference interpretation |
 | `shelllist-local-build` | Native snapshot/build CLI and source-policy tests; not a daemon dependency |
 
 `shelllist-protocol-js` is a binary in **shelllist-daemon-core**, not a separate crate. It generates frontend constants from daemon-owned registries.
