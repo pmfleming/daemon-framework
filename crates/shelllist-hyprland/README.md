@@ -39,6 +39,10 @@ This prevents cross-user impersonation, not impersonation by the same user.
 
 `Client::request` uses the command socket directly with one two-second deadline
 covering discovery, connection, writing, and reading (16 MiB reply limit).
+For state-changing commands, use `Client::request_exact`: it requires a valid
+instance signature and only tries that instance in the runtime and legacy roots.
+A missing/stale target fails rather than mutating another session. It uses the
+same deadline and never replays a command after connection.
 Event connections include discovery in the same deadline; event lines are capped
 at 64 KiB including their terminator, even when a peer never sends a newline.
 Oversized or invalid UTF-8 events disconnect and reconnect with normal backoff.
@@ -73,7 +77,7 @@ a nonempty value names the source output. Exact output/mirror identifiers accept
 only ASCII letters, digits, hyphens and underscores, never selectors or executable
 Lua. Exact modes retain their precision and lose only the optional `Hz` suffix.
 
-Pass the result to the existing `Client::request`; there is no new transport,
+Pass the result to `Client::request_exact`; there is no new transport,
 implicit retry, state cache or persistence. An `ok` reply acknowledges the command,
 not an observed hardware transition. The framework owns encoding, syntax checks
 and merge-semantics regression tests, including a private command-socket test.

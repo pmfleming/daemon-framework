@@ -137,7 +137,7 @@ fn mode_scale_and_transform_validation_rejects_invalid_commands() {
 }
 
 #[tokio::test]
-async fn encoded_monitor_rule_uses_existing_native_transport() {
+async fn encoded_monitor_rule_uses_exact_native_transport() {
     let (_root, client, server) = crate::tests::command_server(
         "eval hl.monitor({ output = \"DP-1\", disabled = false, mode = \"1920x1200@60.00\", position = \"-1920x120\", scale = 1.25, transform = 0, mirror = \"\" })",
         "ok",
@@ -147,6 +147,6 @@ async fn encoded_monitor_rule_uses_existing_native_transport() {
         configured(Mode::Exact("1920x1200@60.00Hz"), 1.25, Some(0), ""),
     )
     .unwrap();
-    assert_eq!(client.request(&command).await.unwrap(), "ok");
+    assert_eq!(client.request_exact(&command).await.unwrap(), "ok");
     server.await.unwrap();
 }

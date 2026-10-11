@@ -30,7 +30,8 @@ pub enum Rule<'a> {
     },
 }
 
-/// Encode one `eval hl.monitor(...)` request for [`crate::Client::request`].
+/// Encode one `eval hl.monitor(...)` request for [`crate::Client::request_exact`].
+/// Use exact targeting so a stale session cannot redirect mutations elsewhere.
 ///
 /// Accepts exact ASCII connector identifiers, not selectors, expressions or Lua.
 /// Validation here protects command syntax, finite positive scales/modes and the

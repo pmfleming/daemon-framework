@@ -57,11 +57,30 @@ impl Client {
         }
     }
 
+    /// Request with discovery fallback. Prefer [`Self::request_exact`] for mutations.
     pub async fn request(&self, command: &str) -> Result<String> {
         bounded_ipc(async {
             let stream = self.connect(COMMAND_SOCKET).await?;
             // Fail over only while connecting, never replay a command that may
             // already have changed compositor state.
+            request_socket(stream, command).await
+        })
+        .await
+    }
+
+    /// Send only to the configured instance, never to a different signature.
+    ///
+    /// Requires a valid signature. Both runtime and legacy locations are tried,
+    /// but commands are never replayed after a connection succeeds.
+    pub async fn request_exact(&self, command: &str) -> Result<String> {
+        bounded_ipc(async {
+            let signature = self
+                .signature
+                .as_deref()
+                .context("exact Hyprland request requires a valid instance signature")?;
+            let candidates =
+                exact_socket_candidates(&self.roots(), signature, COMMAND_SOCKET).await;
+            let stream = connect_candidates(&candidates).await?;
             request_socket(stream, command).await
         })
         .await
@@ -108,6 +127,15 @@ async fn bounded_ipc<T>(operation: impl Future<Output = Result<T>>) -> Result<T>
         .context("Hyprland IPC timed out")?
 }
 
+async fn exact_socket_candidates(roots: &[PathBuf], signature: &str, socket: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let uid = rustix::process::geteuid().as_raw();
+    for root in roots {
+        add_socket(&mut candidates, root.join(signature).join(socket), uid).await;
+    }
+    candidates
+}
+
 // Prefer the requested instance in either root, then sorted fallback instances
 // in runtime-root / legacy-root order. Socket existence alone is not liveness.
 async fn socket_candidates(
@@ -115,13 +143,11 @@ async fn socket_candidates(
     signature: Option<&str>,
     socket: &str,
 ) -> Result<Vec<PathBuf>> {
-    let mut candidates = Vec::new();
+    let mut candidates = match signature {
+        Some(signature) => exact_socket_candidates(roots, signature, socket).await,
+        None => Vec::new(),
+    };
     let uid = rustix::process::geteuid().as_raw();
-    if let Some(signature) = signature {
-        for root in roots {
-            add_socket(&mut candidates, root.join(signature).join(socket), uid).await;
-        }
-    }
     for root in roots {
         let Ok(mut entries) = fs::read_dir(root).await else {
             continue;
@@ -349,6 +375,59 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn exact_requests_never_use_another_instance() {
+        let (root, _client, fallback) = socket_fixture(COMMAND_SOCKET).await;
+        let signature = root
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let missing = format!("{signature}-missing");
+        let instance = root.path().join("hypr").join(&signature);
+        fs::create_dir_all(&instance).await.unwrap();
+        drop(tokio::net::UnixListener::bind(instance.join(COMMAND_SOCKET)).unwrap());
+        for signature in [
+            None,
+            Some(missing),
+            Some(signature),
+            Some("../invalid".into()),
+        ] {
+            let client = Client::new(root.path().into(), signature);
+            assert!(client.request_exact("dispatch test").await.is_err());
+        }
+        assert!(
+            time::timeout(Duration::from_millis(50), fallback.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_discovery_tries_only_matching_signature_across_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = [root.path().join("runtime"), root.path().join("legacy")];
+        for base in &roots {
+            fs::create_dir_all(base.join("preferred")).await.unwrap();
+        }
+        drop(
+            tokio::net::UnixListener::bind(roots[0].join("preferred").join(COMMAND_SOCKET))
+                .unwrap(),
+        );
+        let listener =
+            tokio::net::UnixListener::bind(roots[1].join("preferred").join(COMMAND_SOCKET))
+                .unwrap();
+        let candidates = super::exact_socket_candidates(&roots, "preferred", COMMAND_SOCKET).await;
+        assert_eq!(
+            candidates,
+            roots.map(|root| root.join("preferred").join(COMMAND_SOCKET))
+        );
+        let _stream = connect_candidates(&candidates).await.unwrap();
+        let _peer = listener.accept().await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
