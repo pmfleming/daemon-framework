@@ -242,7 +242,11 @@ async fn connect_candidates(candidates: &[PathBuf]) -> Result<UnixStream> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Connected,
-    Disconnected,
+    /// An established connection ended: None for EOF, Some for a read/protocol error.
+    Disconnected(Option<String>),
+    /// Connection failed, including at startup. Identical consecutive failures
+    /// are suppressed until the cause changes or a connection succeeds.
+    ConnectFailed(String),
     Message(String),
 }
 
@@ -262,11 +266,28 @@ where
     F: Fn(Event) -> T,
 {
     let watch = async {
+        let mut last_connect_error = None;
         loop {
-            if let Ok(stream) = client.event_socket().await
-                && forward_events(stream, &sender, &map).await.is_err()
-            {
-                return;
+            match client.event_socket().await {
+                Ok(stream) => {
+                    last_connect_error = None;
+                    if forward_events(stream, &sender, &map).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let cause = format!("{error:#}");
+                    if last_connect_error.as_ref() != Some(&cause) {
+                        if sender
+                            .send(map(Event::ConnectFailed(cause.clone())))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        last_connect_error = Some(cause);
+                    }
+                }
             }
             // Back off even when a socket accepts and immediately closes.
             time::sleep(RECONNECT_DELAY).await;
@@ -283,10 +304,14 @@ async fn forward_events<T>(
 ) -> Result<(), mpsc::error::SendError<T>> {
     sender.send(map(Event::Connected)).await?;
     let mut reader = BufReader::new(stream);
-    while let Ok(Some(line)) = read_event(&mut reader).await {
-        sender.send(map(Event::Message(line))).await?;
-    }
-    sender.send(map(Event::Disconnected)).await
+    let cause = loop {
+        match read_event(&mut reader).await {
+            Ok(Some(line)) => sender.send(map(Event::Message(line))).await?,
+            Ok(None) => break None,
+            Err(error) => break Some(format!("{error:#}")),
+        }
+    };
+    sender.send(map(Event::Disconnected(cause))).await
 }
 
 // Bound an unterminated line too: read_line/lines would otherwise grow forever.
@@ -628,7 +653,9 @@ mod tests {
                     time::timeout(Duration::from_secs(1), events.recv())
                         .await
                         .unwrap(),
-                    Some(Event::Disconnected)
+                    Some(Event::Disconnected(Some(
+                        "Hyprland event is too large".into()
+                    )))
                 );
             }
             // Cancel either a partial read or the oversized-frame backoff.
@@ -718,6 +745,46 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn initial_connection_failure_is_reported_once_and_backoff_is_cancellable() {
+        let client = Client::new("/unused".into(), Some("../invalid".into()));
+        let (sender, mut events) = mpsc::channel(8);
+        let task = tokio::spawn(watch_events_with(client, sender, |event| event));
+        let Some(Event::ConnectFailed(cause)) = events.recv().await else {
+            panic!("expected initial connection failure");
+        };
+        assert!(cause.contains("invalid HYPRLAND_INSTANCE_SIGNATURE"));
+        // Several retries occur, but an unchanged failure must not spam consumers.
+        assert!(
+            time::timeout(Duration::from_secs(3), events.recv())
+                .await
+                .is_err()
+        );
+        drop(events);
+        time::timeout(Duration::from_millis(100), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_read_failure_retains_its_cause() {
+        let (stream, mut peer) = tokio::net::UnixStream::pair().unwrap();
+        let (sender, mut events) = mpsc::channel(8);
+        let task = tokio::spawn(async move {
+            super::forward_events(stream, &sender, &|event| event)
+                .await
+                .unwrap();
+        });
+        assert_eq!(events.recv().await, Some(Event::Connected));
+        peer.write_all(b"\xff\n").await.unwrap();
+        let Some(Event::Disconnected(Some(cause))) = events.recv().await else {
+            panic!("expected a disconnection with a cause");
+        };
+        assert!(cause.contains("utf-8"));
+        task.await.unwrap();
+    }
+
     #[tokio::test]
     async fn event_stream_reports_reconnects_and_backs_off_after_eof() {
         let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
@@ -734,7 +801,7 @@ mod tests {
             Event::Message("openwindow>>123,1,app,title".into())
         );
         drop(stream);
-        assert_eq!(events.recv().await.unwrap(), Event::Disconnected);
+        assert_eq!(events.recv().await.unwrap(), Event::Disconnected(None));
         assert!(
             time::timeout(Duration::from_millis(50), listener.accept())
                 .await

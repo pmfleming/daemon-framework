@@ -50,7 +50,17 @@ constructors remain infallible. An absent signature still permits ordinary disco
 Event connections include discovery in the same deadline; event lines are capped
 at 64 KiB including their terminator, even when a peer never sends a newline.
 Oversized or invalid UTF-8 events disconnect and reconnect with normal backoff.
-Idle event streams have no read timeout, and receiver closure cancels all phases. `watch_events_detailed` reports Connected, Disconnected, and raw Message events so consumers can filter domain changes and adapt fallback polling. Reconnection is delayed by one second, including accept-then-EOF failures; closing the receiver stops the watcher. The original unit-valued `watch_events` API remains available.
+Idle event streams have no read timeout, and receiver closure cancels all phases.
+`watch_events_detailed` reports `Connected`, `Disconnected(Option<String>)`,
+`ConnectFailed(String)`, and raw `Message` events. Disconnections carry a cause
+for read/protocol errors, or `None` for EOF. Connection failures are reported even
+at startup; identical consecutive failures are suppressed until the cause changes
+or a connection succeeds. Consumers can distinguish failure from a quiet stream
+and adapt fallback polling without receiving repeated identical errors.
+Reconnection is delayed by one second, including accept-then-EOF failures; closing
+the receiver stops the watcher. Downstream event matches must handle
+`ConnectFailed` and the new `Disconnected` payload. The original unit-valued
+`watch_events` API remains available and also wakes on reported failures.
 
 `Client::work_areas` uses one native JSON batch and resolves workspace rules into
 monitor-keyed logical insets. Parsing, monitor selectors, window/group counts and
