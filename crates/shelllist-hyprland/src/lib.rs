@@ -175,7 +175,9 @@ async fn socket_candidates(
             continue;
         };
         let mut paths = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
+        // A root can disappear or become unreadable mid-scan. Keep preferred
+        // and already collected candidates, and continue with the other roots.
+        while let Ok(Some(entry)) = entries.next_entry().await {
             paths.push(entry.path().join(socket));
         }
         paths.sort();
@@ -604,6 +606,27 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_discovery_roots_do_not_discard_other_candidates() {
+        let (root, _client, _listener) = socket_fixture(COMMAND_SOCKET).await;
+        let unavailable = root.path().join("not-a-directory");
+        fs::write(&unavailable, b"").await.unwrap();
+        let available = root.path().join("hypr");
+        for roots in [
+            vec![unavailable.clone(), available.clone()],
+            vec![available.clone(), unavailable],
+        ] {
+            for signature in [None, Some("test")] {
+                assert_eq!(
+                    socket_candidates(&roots, signature, COMMAND_SOCKET)
+                        .await
+                        .unwrap(),
+                    [available.join("test").join(COMMAND_SOCKET)]
+                );
+            }
         }
     }
 
