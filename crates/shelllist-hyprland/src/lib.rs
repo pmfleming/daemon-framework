@@ -316,16 +316,16 @@ async fn read_event(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<S
 async fn request_socket(mut stream: UnixStream, command: &str) -> Result<String> {
     stream.write_all(command.as_bytes()).await?;
     stream.shutdown().await?;
-    let mut response = String::new();
+    let mut response = Vec::new();
     stream
         .take(MAX_REPLY_BYTES + 1)
-        .read_to_string(&mut response)
+        .read_to_end(&mut response)
         .await?;
     anyhow::ensure!(
         response.len() as u64 <= MAX_REPLY_BYTES,
         "Hyprland reply is too large"
     );
-    Ok(response)
+    String::from_utf8(response).context("Hyprland reply is not valid UTF-8")
 }
 
 fn default_runtime_dir() -> PathBuf {
@@ -581,6 +581,37 @@ mod tests {
                     .contains("too large")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn reply_size_is_checked_before_utf8_decoding() {
+        for (prefix, oversized) in [
+            (super::MAX_REPLY_BYTES as usize - 2, false),
+            (super::MAX_REPLY_BYTES as usize, true),
+        ] {
+            let reply = format!("{}é", "x".repeat(prefix));
+            let (_root, client, server) = command_server("j/clients", reply).await;
+            let result = client.request_exact("j/clients").await;
+            if oversized {
+                // take(MAX + 1) retains only the first byte of é.
+                assert!(result.unwrap_err().to_string().contains("too large"));
+            } else {
+                let reply = result.unwrap();
+                assert_eq!(reply.len(), super::MAX_REPLY_BYTES as usize);
+                assert!(reply.ends_with('é'));
+            }
+            server.await.unwrap();
+        }
+        let (_root, client, server) = command_server("j/clients", [0xff]).await;
+        assert!(
+            client
+                .request_exact("j/clients")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("UTF-8")
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]
