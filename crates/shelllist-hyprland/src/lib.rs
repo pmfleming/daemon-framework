@@ -6,6 +6,7 @@ mod work_area_tests;
 
 use std::{
     env,
+    ffi::OsString,
     future::Future,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::PathBuf,
@@ -31,7 +32,7 @@ const MAX_REPLY_BYTES: u64 = 16 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct Client {
     runtime_dir: PathBuf,
-    signature: Option<String>,
+    signature: Option<OsString>,
 }
 
 impl Default for Client {
@@ -46,15 +47,37 @@ impl Client {
         let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(default_runtime_dir);
-        Self::new(runtime_dir, env::var("HYPRLAND_INSTANCE_SIGNATURE").ok())
+        Self {
+            runtime_dir,
+            signature: env::var_os("HYPRLAND_INSTANCE_SIGNATURE"),
+        }
     }
 
+    /// Invalid signatures are retained and reported by IPC operations, not
+    /// silently treated as absent. Use [`Self::instance_signature`] to validate early.
     #[must_use]
     pub fn new(runtime_dir: PathBuf, signature: Option<String>) -> Self {
         Self {
             runtime_dir,
-            signature: signature.filter(|value| valid_signature(value)),
+            signature: signature.map(OsString::from),
         }
+    }
+
+    /// The configured signature, distinguishing absent from invalid configuration.
+    pub fn instance_signature(&self) -> Result<Option<&str>> {
+        self.signature
+            .as_deref()
+            .map(|value| {
+                let value = value
+                    .to_str()
+                    .context("HYPRLAND_INSTANCE_SIGNATURE is not valid Unicode")?;
+                anyhow::ensure!(
+                    valid_signature(value),
+                    "invalid HYPRLAND_INSTANCE_SIGNATURE"
+                );
+                Ok(value)
+            })
+            .transpose()
     }
 
     /// Request with discovery fallback. Prefer [`Self::request_exact`] for mutations.
@@ -75,9 +98,8 @@ impl Client {
     pub async fn request_exact(&self, command: &str) -> Result<String> {
         bounded_ipc(async {
             let signature = self
-                .signature
-                .as_deref()
-                .context("exact Hyprland request requires a valid instance signature")?;
+                .instance_signature()?
+                .context("exact Hyprland request requires an instance signature")?;
             let candidates =
                 exact_socket_candidates(&self.roots(), signature, COMMAND_SOCKET).await;
             let stream = connect_candidates(&candidates).await?;
@@ -104,7 +126,7 @@ impl Client {
 
     async fn connect(&self, socket: &str) -> Result<UnixStream> {
         let candidates =
-            socket_candidates(&self.roots(), self.signature.as_deref(), socket).await?;
+            socket_candidates(&self.roots(), self.instance_signature()?, socket).await?;
         connect_candidates(&candidates).await
     }
 
@@ -375,6 +397,51 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_is_reported_without_discovery_fallback() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let (root, _client, listener) = socket_fixture(COMMAND_SOCKET).await;
+        let mut signatures = vec![std::ffi::OsString::from_vec(vec![0xff])];
+        signatures.extend(["", ".", "..", "../other", "nested/instance"].map(Into::into));
+        for signature in signatures {
+            let client = Client {
+                runtime_dir: root.path().into(),
+                signature: Some(signature),
+            };
+            assert!(client.instance_signature().is_err());
+            for error in [
+                client.request("j/clients").await.unwrap_err(),
+                client.request_exact("dispatch test").await.unwrap_err(),
+                client.event_socket().await.unwrap_err(),
+            ] {
+                assert!(error.to_string().contains("HYPRLAND_INSTANCE_SIGNATURE"));
+            }
+        }
+        assert!(
+            time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            Client::new(root.path().into(), None)
+                .instance_signature()
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            Client::new(root.path().into(), Some("test".into()))
+                .instance_signature()
+                .unwrap(),
+            Some("test")
+        );
+        assert!(
+            Client::new(root.path().into(), Some("../other".into()))
+                .instance_signature()
+                .is_err()
+        );
     }
 
     #[tokio::test]

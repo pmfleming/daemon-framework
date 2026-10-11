@@ -43,6 +43,10 @@ For state-changing commands, use `Client::request_exact`: it requires a valid
 instance signature and only tries that instance in the runtime and legacy roots.
 A missing/stale target fails rather than mutating another session. It uses the
 same deadline and never replays a command after connection.
+Malformed or non-Unicode `HYPRLAND_INSTANCE_SIGNATURE` values cause all IPC
+operations to fail explicitly instead of enabling discovery fallback.
+`Client::instance_signature` lets callers inspect/validate configuration early;
+constructors remain infallible. An absent signature still permits ordinary discovery.
 Event connections include discovery in the same deadline; event lines are capped
 at 64 KiB including their terminator, even when a peer never sends a newline.
 Oversized or invalid UTF-8 events disconnect and reconnect with normal backoff.
