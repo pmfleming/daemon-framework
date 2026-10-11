@@ -116,9 +116,10 @@ async fn socket_candidates(
     socket: &str,
 ) -> Result<Vec<PathBuf>> {
     let mut candidates = Vec::new();
+    let uid = rustix::process::geteuid().as_raw();
     if let Some(signature) = signature {
         for root in roots {
-            add_socket(&mut candidates, root.join(signature).join(socket)).await;
+            add_socket(&mut candidates, root.join(signature).join(socket), uid).await;
         }
     }
     for root in roots {
@@ -131,32 +132,54 @@ async fn socket_candidates(
         }
         paths.sort();
         for path in paths {
-            add_socket(&mut candidates, path).await;
+            add_socket(&mut candidates, path, uid).await;
         }
     }
     Ok(candidates)
 }
 
-async fn add_socket(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+async fn add_socket(candidates: &mut Vec<PathBuf>, path: PathBuf, uid: u32) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    // Reject symlink sockets/directories and instance directories that another
+    // user can modify. Peer credentials below also protect the check/connect gap.
     if !candidates.contains(&path)
-        && fs::metadata(&path)
+        && fs::symlink_metadata(parent)
             .await
-            .is_ok_and(|m| m.file_type().is_socket())
+            .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o022 == 0)
+        && fs::symlink_metadata(&path)
+            .await
+            .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
     {
         candidates.push(path);
     }
 }
 
+fn validate_peer(stream: UnixStream, uid: u32) -> Result<UnixStream> {
+    anyhow::ensure!(
+        stream
+            .peer_cred()
+            .context("read Hyprland peer credentials")?
+            .uid()
+            == uid,
+        "Hyprland socket peer belongs to a different user"
+    );
+    Ok(stream)
+}
+
 async fn connect_candidates(candidates: &[PathBuf]) -> Result<UnixStream> {
     let mut last_error = None;
     for socket in candidates {
-        match UnixStream::connect(socket).await {
+        let connection = UnixStream::connect(socket)
+            .await
+            .map_err(anyhow::Error::new)
+            .and_then(|stream| validate_peer(stream, rustix::process::geteuid().as_raw()));
+        match connection {
             Ok(stream) => return Ok(stream),
             Err(error) => {
-                last_error = Some(
-                    anyhow::Error::new(error)
-                        .context(format!("connect to Hyprland socket {}", socket.display())),
-                )
+                last_error =
+                    Some(error.context(format!("connect to Hyprland socket {}", socket.display())))
             }
         }
     }
@@ -256,7 +279,7 @@ async fn request_socket(mut stream: UnixStream, command: &str) -> Result<String>
 }
 
 fn default_runtime_dir() -> PathBuf {
-    let uid = std::fs::metadata("/proc/self").map_or(0, |process| process.uid());
+    let uid = rustix::process::geteuid().as_raw();
     PathBuf::from(format!("/run/user/{uid}"))
 }
 
@@ -527,6 +550,45 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_requires_owned_protected_instance_and_socket() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let (root, _client, _listener) = socket_fixture(COMMAND_SOCKET).await;
+        let instance = root.path().join("hypr/test");
+        let socket = instance.join(COMMAND_SOCKET);
+        let uid = rustix::process::geteuid().as_raw();
+        let mut candidates = Vec::new();
+        super::add_socket(&mut candidates, socket.clone(), uid.wrapping_add(1)).await;
+        assert!(candidates.is_empty());
+        fs::set_permissions(&instance, std::fs::Permissions::from_mode(0o777))
+            .await
+            .unwrap();
+        super::add_socket(&mut candidates, socket.clone(), uid).await;
+        assert!(candidates.is_empty());
+        fs::set_permissions(&instance, std::fs::Permissions::from_mode(0o700))
+            .await
+            .unwrap();
+        let alias = instance.join("alias.sock");
+        symlink(&socket, &alias).unwrap();
+        super::add_socket(&mut candidates, alias, uid).await;
+        let directory_alias = root.path().join("alias");
+        symlink(&instance, &directory_alias).unwrap();
+        super::add_socket(&mut candidates, directory_alias.join(COMMAND_SOCKET), uid).await;
+        assert!(candidates.is_empty());
+        super::add_socket(&mut candidates, socket.clone(), uid).await;
+        assert_eq!(candidates, [socket]);
+    }
+
+    #[tokio::test]
+    async fn connected_peer_must_match_expected_user() {
+        let uid = rustix::process::geteuid().as_raw();
+        let (stream, _peer) = tokio::net::UnixStream::pair().unwrap();
+        assert!(super::validate_peer(stream, uid).is_ok());
+        let (stream, _peer) = tokio::net::UnixStream::pair().unwrap();
+        assert!(super::validate_peer(stream, uid.wrapping_add(1)).is_err());
     }
 
     #[test]

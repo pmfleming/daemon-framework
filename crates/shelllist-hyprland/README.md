@@ -31,7 +31,11 @@ workspace CI and Shelllist's `frameworkWorkspace` check include these tests.
 Discovery prefers the requested instance across the runtime and legacy roots,
 then tries other socket candidates in sorted runtime-root / legacy-root order.
 Stale sockets that refuse connections are skipped. Commands are never replayed
-on another instance after a connection succeeds.
+on another instance after a connection succeeds. Candidates must be sockets owned
+by the effective user, inside owned instance directories that are not group- or
+world-writable; symlink sockets and instance directories are rejected. Connected
+peer credentials must also match before commands are sent or events are read.
+This prevents cross-user impersonation, not impersonation by the same user.
 
 `Client::request` uses the command socket directly with one two-second deadline
 covering discovery, connection, writing, and reading (16 MiB reply limit).
