@@ -7,18 +7,14 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        toolchain: ["1.85.0", stable]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          toolchain: ${{ matrix.toolchain }}
           components: clippy,rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
 
   # Framework-only changes must exercise every current consumer immediately.
   # No per-daemon framework pins: this checkout overrides them all.
@@ -29,10 +25,10 @@ jobs:
         with:
           path: daemon-framework
       - uses: cachix/install-nix-action@v31
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Check out current consumers
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Check out current consumers and update-file producer
         run: |
-          for repo in shelllist app-daemon bar-daemon bt-daemon clip-daemon nm-daemon; do
+          for repo in shelllist app-daemon bar-daemon bt-daemon clip-daemon nm-daemon update-daemon; do
             git clone --depth 1 --branch main "https://github.com/pmfleming/$repo.git" "$repo"
           done
       - name: Test shared source policy

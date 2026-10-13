@@ -15,7 +15,7 @@ rustix = { version = "1", features = ["time"] }
 shelllist-daemon-core = { version = "0.1.0", path = "../shelllist-daemon-core" }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt", "signal", "sync", "time"] }
 tracing = "0.1"
-zbus = { version = "5", features = ["tokio"] }
+zbus = { version = "5.18", features = ["tokio"] }
 
 [lints]
 workspace = true

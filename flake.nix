@@ -19,6 +19,7 @@
     in
     {
       lib = {
+        toolchain = import ./nix/toolchain.nix;
         # The tools and workspace check share one compiled dependency layer.
         workspaceArtifacts =
           pkgs:
@@ -32,6 +33,10 @@
           }).cargoArtifacts;
         buildRustPackage =
           pkgs:
+          let
+            toolchain = self.lib.toolchain pkgs;
+          in
+          assert toolchain.expected == pkgs.rustc.version;
           import ./nix/build-rust-package.nix {
             inherit pkgs;
             craneLib = crane.mkLib pkgs;
@@ -154,6 +159,7 @@
           pkgs = import nixpkgs { inherit system; };
         in
         {
+          toolchain = (self.lib.toolchain pkgs).check;
           localBuild = self.packages.${system}.localBuild;
           protocolBindings = self.packages.${system}.protocolBindings;
           workspace = self.lib.buildRustPackage pkgs {
@@ -194,17 +200,15 @@
         in
         {
           default = pkgs.mkShell {
-            packages = with pkgs; [
-              cargo
-              cargo-audit
-              dbus
-              git
-              clippy
-              nixpkgs-fmt
-              rust-analyzer
-              rustc
-              rustfmt
-            ];
+            packages =
+              (self.lib.toolchain pkgs).packages
+              ++ (with pkgs; [
+                cargo-audit
+                dbus
+                git
+                nixpkgs-fmt
+                rust-analyzer
+              ]);
           };
         }
       );
