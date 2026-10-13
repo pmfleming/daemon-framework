@@ -5,13 +5,17 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use serde_json::{Value, json};
-use shelllist_daemon_core::{ClientMessage, ClientRequest, ClientRoute, DaemonEndpoint};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use shelllist_daemon_core::{
+    ClientMessage, ClientRequest, ClientRoute, DEFAULT_JSONL_REQUEST_BYTES, DaemonEndpoint,
+    MAX_JSONL_REQUEST_BYTES,
+};
+use tokio::io::BufReader;
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::{
     dbus::JsonDbusClient,
+    jsonl_input::{Frame, Frames},
     output_actor::{
         CorrelationPolicy, OutputCommand, OutputHandle, spawn_output_actor_with_writer,
     },
@@ -119,6 +123,19 @@ impl ReconnectingClient {
 }
 
 pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>) -> Result<()> {
+    run_jsonl_client_with_input_limit(config, DEFAULT_JSONL_REQUEST_BYTES).await
+}
+
+/// Opt in to a larger bounded record for bulk payloads. This changes neither
+/// request admission, output bounds, deadlines nor direct D-Bus validation.
+pub async fn run_jsonl_client_with_input_limit<P: CorrelationPolicy>(
+    config: JsonlClientConfig<P>,
+    maximum_request_bytes: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        (1..=MAX_JSONL_REQUEST_BYTES).contains(&maximum_request_bytes),
+        "invalid JSONL request byte limit"
+    );
     let dbus = ReconnectingClient::new(config.endpoint);
     let (output, output_task) = spawn_output_actor_with_writer(
         config.correlation,
@@ -139,6 +156,7 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
         config.cancel_mode,
         config.call_failure,
         &request_slots,
+        maximum_request_bytes,
     )
     .await?;
     drain_calls(&mut calls, config.shutdown_timeout).await;
@@ -162,9 +180,22 @@ async fn request_loop(
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
     request_slots: &RequestSlots,
+    maximum_request_bytes: usize,
 ) -> Result<Option<String>> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    while let Some(line) = lines.next_line().await.context("read JSONL request")? {
+    let mut frames = Frames::new(BufReader::new(tokio::io::stdin()), maximum_request_bytes);
+    while let Some(frame) = frames.next().await.context("read JSONL request")? {
+        let line = match frame {
+            Frame::Line(line) => line,
+            Frame::TooLarge => {
+                output
+                    .send(OutputCommand::ProtocolError(format!(
+                        "JSONL request exceeds {maximum_request_bytes} bytes"
+                    )))
+                    .await?;
+                reap_finished(calls);
+                continue;
+            }
+        };
         let Some(request) = parse_request(&line, output).await? else {
             continue;
         };
@@ -502,6 +533,37 @@ mod tests {
         with_transport_timeout,
     };
     use shelllist_daemon_core::{ClientMessage, ClientRequest, DaemonEndpoint};
+
+    #[tokio::test]
+    async fn invalid_bulk_limits_fail_before_starting_transport_tasks() {
+        for maximum in [
+            0,
+            shelllist_daemon_core::MAX_JSONL_REQUEST_BYTES + 1,
+            usize::MAX,
+        ] {
+            let config = super::JsonlClientConfig {
+                endpoint: DaemonEndpoint::new(
+                    "unused",
+                    "org.example.Unused",
+                    "/org/example/Unused",
+                    "org.example.Unused",
+                ),
+                correlation: crate::BasicCorrelation,
+                cancel_mode: super::CancelMode::Json,
+                call_failure: |_, _| panic!("invalid configuration must not dispatch"),
+                pending_event_limit: 1,
+                max_in_flight_requests: 1,
+                shutdown_timeout: None,
+            };
+            assert_eq!(
+                super::run_jsonl_client_with_input_limit(config, maximum)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "invalid JSONL request byte limit"
+            );
+        }
+    }
     use tokio::task::JoinSet;
 
     #[tokio::test]

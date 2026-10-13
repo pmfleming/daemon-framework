@@ -9,6 +9,7 @@ pub use blocking::{BlockingLane, LaneError, LaneShutdown};
 mod file;
 mod forward;
 mod jsonl;
+mod jsonl_input;
 pub use file::{read_bytes_bounded_async, write_bytes_atomic_async};
 pub use forward::{BroadcastEvent, WatchPhase, emit_json_event, forward_broadcast, forward_watch};
 mod output_actor;
@@ -23,7 +24,10 @@ pub use task::{AbortOnDrop, TaskGroup, catch_task, spawn_named};
 mod subscription;
 
 pub use dbus::{JsonDbusClient, directed_emitter};
-pub use jsonl::{CallFailure, CallFailureMapper, CancelMode, JsonlClientConfig, run_jsonl_client};
+pub use jsonl::{
+    CallFailure, CallFailureMapper, CancelMode, JsonlClientConfig, run_jsonl_client,
+    run_jsonl_client_with_input_limit,
+};
 pub use output_actor::{BasicCorrelation, CorrelationPolicy, TrackedId, TrackedKind};
 pub use shutdown::wait_for_shutdown;
 pub use subscription::{OwnedTaskRegistry, TaskAdmissionError, TaskLimits};

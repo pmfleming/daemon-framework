@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// Default UTF-8 bytes in one bridge input record, excluding LF or CRLF.
+/// Enforced before JSON parsing; this does not bound direct D-Bus calls/results.
+pub const DEFAULT_JSONL_REQUEST_BYTES: usize = 1024 * 1024;
+/// Hard ceiling for explicitly configured bulk clients (notably clipboard text).
+/// Matches the D-Bus message ceiling; actual D-Bus payloads must also fit headers.
+pub const MAX_JSONL_REQUEST_BYTES: usize = 128 * 1024 * 1024;
+
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum ClientRequest {

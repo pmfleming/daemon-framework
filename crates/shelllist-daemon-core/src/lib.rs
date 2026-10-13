@@ -18,9 +18,9 @@ pub use file::{
 pub use endpoint::{DaemonEndpoint, IdSequence};
 pub use envelope::{ApiError, ApiIdentity, Correlation, error, event_envelope, success};
 pub use jsonl_wire::{
-    ClientMessage, ClientRequest, ClientRoute, RouteKind, addressed_message, event_message,
-    protocol_error_message, response_error_message, response_message, shutdown_message,
-    transport_error_message,
+    ClientMessage, ClientRequest, ClientRoute, DEFAULT_JSONL_REQUEST_BYTES,
+    MAX_JSONL_REQUEST_BYTES, RouteKind, addressed_message, event_message, protocol_error_message,
+    response_error_message, response_message, shutdown_message, transport_error_message,
 };
 pub use protocol::{fixture_names, load_fixture, registry_names, validate_unique_names};
 pub use state::{
