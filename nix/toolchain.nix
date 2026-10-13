@@ -12,6 +12,9 @@ let
     platformCargo = pkgs.rustPlatform.rust.cargo.version;
   };
 in
+assert pkgs.lib.assertMsg (
+  pkgs.stdenv.hostPlatform.system == "x86_64-linux"
+) "Shelllist supports x86_64-linux (primarily modern Intel/AMD PCs) only";
 assert pkgs.lib.assertMsg (builtins.all (version: version == expected) (builtins.attrValues actual))
   "Shelllist requires Rust/Cargo ${expected} in builds and developer shells; update the product build-input policy deliberately";
 {

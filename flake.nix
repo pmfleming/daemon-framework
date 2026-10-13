@@ -11,10 +11,7 @@
       crane,
     }:
     let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-      ];
+      systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
@@ -109,7 +106,7 @@
               homepage = "https://github.com/pmfleming/daemon-framework";
               license = pkgs.lib.licenses.mit;
               mainProgram = "shelllist-protocol-js";
-              platforms = pkgs.lib.platforms.linux;
+              platforms = systems;
             };
           };
         in
@@ -146,7 +143,7 @@
               description = "Build one snapshot of the current local Shelllist development graph";
               license = pkgs.lib.licenses.mit;
               mainProgram = "local-build";
-              platforms = pkgs.lib.platforms.linux;
+              platforms = systems;
             };
           };
           default = protocolBindings;

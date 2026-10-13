@@ -47,7 +47,7 @@ Transport tests require `dbus-daemon`, supplied by the development/check environ
 
 ## Nix outputs and caching
 
-The flake exposes `localBuild`, `protocolBindings` (also default), workspace checks and development shells for `x86_64-linux` and `aarch64-linux`. Crane shares compiled dependencies across framework tools/tests. Filtered daemon sources exclude deployment tooling and the local-build crate. Packages expose `rebuildCache` for bounded deployment GC roots; `localBuild.unwrappedProgram` lets integration fixtures intercept Nix without changing production tool resolution.
+The flake exposes `localBuild`, `protocolBindings` (also default), workspace checks and development shells for `x86_64-linux` only, primarily modern Intel/AMD PCs. Binaries retain the portable x86-64 baseline; no host-native or vendor-specific CPU tuning is introduced. ARM is outside the product support/test matrix. Crane shares compiled dependencies across framework tools/tests. Filtered daemon sources exclude deployment tooling and the local-build crate. Packages expose `rebuildCache` for bounded deployment GC roots; `localBuild.unwrappedProgram` lets integration fixtures intercept Nix without changing production tool resolution.
 
 Pipe a daemon registry JSON document into:
 
