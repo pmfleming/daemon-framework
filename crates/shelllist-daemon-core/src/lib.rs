@@ -1,11 +1,16 @@
 //! Runtime-independent infrastructure shared by Shelllist daemons.
 
+mod contract;
+pub use contract::{
+    CONTRACT_VERSION, ExecutionMode, MethodPolicy, Sensitivity, StreamSemantics, method_schemas,
+};
 mod endpoint;
 mod envelope;
 mod file;
 mod jsonl_wire;
 mod operation;
 mod protocol;
+pub mod wire;
 pub use operation::{
     OperationAdmissionError, OperationLimits, OwnedOperation, OwnedOperations, RecentResults,
 };

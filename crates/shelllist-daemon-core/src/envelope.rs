@@ -16,11 +16,13 @@ impl ApiIdentity {
 
 /// Configurable API error fields. Optional fields are omitted to preserve each
 /// daemon's existing wire contract.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
 }
 
