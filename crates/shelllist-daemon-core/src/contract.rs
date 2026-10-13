@@ -81,6 +81,7 @@ macro_rules! declare_methods {
             result: $result:ty,
             handler: $handler:ident,
             reply: $build:expr,
+            response_key: $key:literal,
             policy: $policy:expr,
             stream: $stream:expr,
             example: $example:expr,
@@ -99,6 +100,9 @@ macro_rules! declare_methods {
             pub const fn name(self) -> &'static str {
                 match self { $(Self::$variant => $name),+ }
             }
+            pub const fn response_key(self) -> &'static str {
+                match self { $(Self::$variant => $key),+ }
+            }
             pub const fn policy(self) -> $crate::MethodPolicy {
                 match self { $(Self::$variant => $policy),+ }
             }
@@ -107,6 +111,7 @@ macro_rules! declare_methods {
                     let params: $params = $example;
                     let mut entry = $crate::method_schemas::<$params, $result>();
                     entry["name"] = serde_json::json!($name);
+                    entry["response_key"] = serde_json::json!($key);
                     entry["params_example"] = serde_json::json!(params);
                     entry["stream"] = serde_json::json!($stream);
                     entry["policy"] = serde_json::json!(self.policy());
@@ -162,6 +167,7 @@ mod tests {
             result: u32,
             handler: count,
             reply: |count| json!({"count": count}),
+            response_key: "count",
             policy: MethodPolicy::new(ExecutionMode::Read, Sensitivity::Public, "test"),
             stream: "test.changed",
             example: Params { count: 1 },
@@ -175,6 +181,7 @@ mod tests {
         };
         assert_eq!(METHODS, &["test.count"]);
         assert_eq!(Method::ALL[0].name(), METHODS[0]);
+        assert_eq!(Method::Count.response_key(), "count");
         let entry = Method::Count.registry_entry();
         assert_eq!(entry["params_schema"]["additionalProperties"], false);
         assert_eq!(entry["result_schema"]["type"], "integer");
