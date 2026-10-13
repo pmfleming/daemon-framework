@@ -3,19 +3,19 @@ use std::io;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Frame {
+pub(super) enum Frame {
     Line(String),
     TooLarge,
 }
 
-pub(crate) struct Frames<R> {
+pub(super) struct Frames<R> {
     reader: R,
     bytes: Vec<u8>,
     maximum: usize,
     oversized: bool,
 }
 impl<R: AsyncBufRead + Unpin> Frames<R> {
-    pub(crate) fn new(reader: R, maximum: usize) -> Self {
+    pub(super) fn new(reader: R, maximum: usize) -> Self {
         assert!(maximum < usize::MAX);
         Self {
             reader,
@@ -25,7 +25,7 @@ impl<R: AsyncBufRead + Unpin> Frames<R> {
         }
     }
 
-    pub(crate) async fn next(&mut self) -> io::Result<Option<Frame>> {
+    pub(super) async fn next(&mut self) -> io::Result<Option<Frame>> {
         loop {
             let available = self.reader.fill_buf().await?;
             if available.is_empty() {
@@ -40,24 +40,8 @@ impl<R: AsyncBufRead + Unpin> Frames<R> {
             if !self.oversized {
                 // One extra byte permits CR at the end of a maximum-sized CRLF
                 // record, even when the newline arrives in the next read.
-                let ceiling = self.maximum + 1;
-                if count > ceiling - self.bytes.len() {
-                    self.oversized = true;
-                    self.bytes.clear();
-                } else {
-                    let needed = self.bytes.len() + count;
-                    if needed > self.bytes.capacity() {
-                        // Ordinary Vec growth could double beyond the limit.
-                        let capacity = self
-                            .bytes
-                            .capacity()
-                            .saturating_mul(2)
-                            .max(needed)
-                            .min(ceiling);
-                        self.bytes.reserve_exact(capacity - self.bytes.len());
-                    }
-                    self.bytes.extend_from_slice(&available[..count]);
-                }
+                self.oversized =
+                    !extend_bounded(&mut self.bytes, &available[..count], self.maximum + 1);
             }
             self.reader.consume(count + usize::from(newline.is_some()));
             if newline.is_some() {
@@ -90,16 +74,35 @@ impl<R: AsyncBufRead + Unpin> Frames<R> {
     }
 }
 
+// Retain geometric growth without allocating beyond the record ceiling.
+// On overflow discard the entire prefix, never a suffix that could become a call.
+fn extend_bounded(bytes: &mut Vec<u8>, chunk: &[u8], ceiling: usize) -> bool {
+    if chunk.len() > ceiling - bytes.len() {
+        bytes.clear();
+        return false;
+    }
+    let needed = bytes.len() + chunk.len();
+    if needed > bytes.capacity() {
+        let capacity = bytes.capacity().saturating_mul(2).max(needed).min(ceiling);
+        bytes.reserve_exact(capacity - bytes.len());
+    }
+    bytes.extend_from_slice(chunk);
+    true
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Frame, Frames};
+    use std::io;
     use tokio::io::{AsyncWriteExt, BufReader};
 
     #[tokio::test]
     async fn boundaries_crlf_blank_lines_eof_and_split_utf8() -> io::Result<()> {
-        for capacity in 1..=12 {
-            let input = b"12345678\n12345678\r\n\n\r\n\xc3\xa9\xc3\xa9\n123456789\n12345678";
-            let mut frames = Frames::new(BufReader::with_capacity(capacity, &input[..]), 8);
+        for (capacity, maximum) in
+            (1..=12).flat_map(|capacity| [0, 1, 3, 8].map(|maximum| (capacity, maximum)))
+        {
+            let input = b"12345678\n12345678\r\n\n\r\n\xc3\xa9\xc3\xa9\n123456789\n12345678\n\r";
+            let mut frames = Frames::new(BufReader::with_capacity(capacity, &input[..]), maximum);
             for expected in [
                 Frame::Line("12345678".into()),
                 Frame::Line("12345678".into()),
@@ -108,20 +111,18 @@ mod tests {
                 Frame::Line("éé".into()),
                 Frame::TooLarge,
                 Frame::Line("12345678".into()),
+                Frame::Line("\r".into()), // Bare CR at EOF is data, not a CRLF delimiter.
             ] {
+                let expected = match expected {
+                    Frame::Line(line) if line.len() > maximum => Frame::TooLarge,
+                    frame => frame,
+                };
                 assert_eq!(frames.next().await?, Some(expected));
-                assert!(frames.bytes.capacity() <= 9);
+                assert!(frames.bytes.capacity() <= maximum + 1);
             }
             assert_eq!(frames.next().await?, None);
         }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn bounds_bytes_not_characters_and_keeps_invalid_utf8_fatal() -> io::Result<()> {
-        let mut frames = Frames::new(BufReader::new(&b"\xc3\xa9\xc3\xa9\nok\n\xff\n"[..]), 3);
-        assert_eq!(frames.next().await?, Some(Frame::TooLarge));
-        assert_eq!(frames.next().await?, Some(Frame::Line("ok".into())));
+        let mut frames = Frames::new(BufReader::new(&b"\xff\n"[..]), 8);
         let error = frames.next().await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "stream did not contain valid UTF-8");

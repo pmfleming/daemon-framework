@@ -45,9 +45,6 @@ fn logical_reservations_css_gaps_and_ordered_rules() {
     parts[0][0]["reserved"] = json!([7, 92, 13, 28]);
     assert_margins(&parts, "eDP-1", [23.0, 96.0, 21.0, 40.0]);
     assert!(margins(&parts, "missing").is_null());
-}
-#[test]
-fn css_shorthand_accepts_one_to_four_finite_numbers_only() {
     let mut parts = fixture();
     for (text, array, expected) in [
         ("1", json!([1]), [1.0, 52.0, 1.0, 1.0]),
@@ -190,7 +187,7 @@ fn named_special_monitor_and_malformed_selectors() {
     assert_rule(&mut parts, "s[true]", "eDP-1", 51.0);
 }
 #[test]
-fn directional_selection_keeps_first_tie_and_skips_disabled_monitors() {
+fn directional_selection_respects_geometry_ties_and_disabled_monitors() {
     let mut parts = fixture();
     let mut other = parts[0][1].clone();
     other["name"] = json!("DP-2");
@@ -202,10 +199,6 @@ fn directional_selection_keeps_first_tie_and_skips_disabled_monitors() {
     assert_eq!(margins(&parts, "DP-2")["top"], 80.0);
     parts[0][0]["focused"] = json!(false);
     assert_eq!(margins(&parts, "DP-2")["top"], 82.0);
-}
-
-#[test]
-fn directional_selection_normalizes_axes_after_rotation_and_scaling() {
     for (direction, x, y, transform) in [
         ("l", -1920, 0, 0),
         ("r", 1536, 0, 0),
@@ -223,18 +216,6 @@ fn directional_selection_normalizes_axes_after_rotation_and_scaling() {
         parts[0][1]["y"] = json!(y);
         assert_rule(&mut parts, &format!("m[{direction}]"), "DP-1", 80.0);
     }
-}
-
-#[tokio::test]
-#[ignore = "requires a running Hyprland session; read-only probe"]
-async fn live_work_areas() {
-    let areas = crate::Client::default().work_areas().await.unwrap();
-    assert!(!areas.is_empty());
-    assert!(areas.values().all(|value| {
-        [value.left, value.top, value.right, value.bottom]
-            .iter()
-            .all(|v| v.is_finite())
-    }));
 }
 
 #[tokio::test]

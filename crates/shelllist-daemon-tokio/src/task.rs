@@ -118,25 +118,6 @@ mod tests {
     use super::{TaskGroup, catch_task, spawn_named};
     use std::sync::Arc;
 
-    #[tokio::test]
-    async fn shutdown_joins_and_rejects_late_spawns() {
-        let tasks = TaskGroup::default();
-        let marker = Arc::new(());
-        let held = marker.clone();
-        tasks.spawn("test", async move {
-            let _held = held;
-            std::future::pending::<()>().await;
-        });
-        tasks.shutdown().await;
-        assert_eq!(Arc::strong_count(&marker), 1);
-        let held = marker.clone();
-        assert!(!tasks.spawn("closed", async move {
-            let _held = held;
-        }));
-        assert_eq!(Arc::strong_count(&marker), 1);
-        tasks.shutdown().await;
-    }
-
     struct ReconnectOnDrop(Arc<TaskGroup>, Arc<()>);
     impl Drop for ReconnectOnDrop {
         fn drop(&mut self) {
@@ -149,7 +130,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_closes_gate_before_cancellation_cleanup() {
+    async fn shutdown_closes_admission_before_cleanup_and_joins_workers() {
         let tasks = Arc::new(TaskGroup::default());
         let marker = Arc::new(());
         let guard = ReconnectOnDrop(tasks.clone(), marker.clone());
@@ -160,10 +141,11 @@ mod tests {
             std::future::pending::<()>().await;
         });
         started.await.unwrap();
-        tasks.abort();
         tasks.shutdown().await;
         assert_eq!(Arc::strong_count(&marker), 1);
         assert_eq!(Arc::strong_count(&tasks), 1);
+        assert!(!tasks.spawn("closed", async {}));
+        tasks.shutdown().await;
     }
 
     #[tokio::test]

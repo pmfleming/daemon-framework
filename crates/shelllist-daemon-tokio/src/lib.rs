@@ -9,7 +9,6 @@ pub use blocking::{BlockingLane, LaneError, LaneShutdown};
 mod file;
 mod forward;
 mod jsonl;
-mod jsonl_input;
 pub use file::{read_bytes_bounded_async, write_bytes_atomic_async};
 pub use forward::{BroadcastEvent, WatchPhase, emit_json_event, forward_broadcast, forward_watch};
 mod output_actor;

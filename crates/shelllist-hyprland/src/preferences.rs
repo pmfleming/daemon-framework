@@ -46,7 +46,6 @@ pub fn preference_event(event: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{parse, preference_event};
-    use crate::tests::command_server;
 
     #[test]
     fn parses_boolean_and_legacy_integer_options_without_guessing() {
@@ -79,16 +78,5 @@ mod tests {
         assert!(preference_event("configreloaded>>"));
         assert!(!preference_event("configreloaded-extra>>"));
         assert!(!preference_event("activewindow>>configreloaded"));
-    }
-
-    #[tokio::test]
-    async fn preference_read_uses_native_bounded_command_transport() {
-        let (_root, client, server) = command_server(
-            "j/getoption animations:enabled",
-            r#"{"option":"animations:enabled","bool":false}"#,
-        )
-        .await;
-        assert!(!client.preferences().await.unwrap().animations_enabled);
-        server.await.unwrap();
     }
 }

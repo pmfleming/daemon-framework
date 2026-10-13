@@ -84,33 +84,6 @@ async fn monitors_with_identical_unique_names_on_different_buses_are_independent
 }
 
 #[tokio::test]
-async fn owner_loss_ends_and_unregisters_managed_work() {
-    let bus = Bus::start();
-    let server = bus.connection().await;
-    let caller = bus.connection().await;
-    let owner = caller.unique_name().unwrap().to_string();
-    let registry = crate::OwnedTaskRegistry::default();
-    let marker = std::sync::Arc::new(());
-    let held = marker.clone();
-    registry
-        .spawn_for_owner("sub".into(), Some(owner.clone()), &server, async move {
-            let _held = held;
-            std::future::pending::<()>().await;
-        })
-        .unwrap();
-    assert!(!registry.cancel_owned("sub", Some(":unrelated")).await);
-    caller.close().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while std::sync::Arc::strong_count(&marker) != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(!registry.cancel_owned("sub", Some(&owner)).await);
-}
-
-#[tokio::test]
 async fn losing_the_bus_wakes_monitor_receivers_with_failure() {
     let bus = Bus::start();
     let monitor = crate::OwnerLossMonitor::new(bus.connection().await);
@@ -160,10 +133,11 @@ async fn shared_emission_preserves_wire_shape_and_directed_delivery() {
         .await
         .unwrap()
         .unwrap();
-    let (stream, event): (String, String) = message.body().deserialize().unwrap();
+    let body = message.body();
+    let (stream, event): (String, &str) = body.deserialize().unwrap();
     assert_eq!(stream, "test.changed");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&event).unwrap(),
+        serde_json::from_str::<serde_json::Value>(event).unwrap(),
         json!({
             "protocol": "test-api", "version": 1, "stream": "test.changed", "event": "changed", "subscription_id": "sub-1", "data": { "revision": 7 }
         })

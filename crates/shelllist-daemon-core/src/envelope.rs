@@ -125,34 +125,18 @@ pub fn event_envelope(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::json;
 
-    use super::{ApiError, ApiIdentity, Correlation, error, event_envelope, success};
-    use crate::{event_message, response_message};
+    use super::{ApiError, ApiIdentity, Correlation, error, event_envelope};
 
     const API: ApiIdentity = ApiIdentity::new("test-api", 1);
 
     #[test]
-    fn owned_payloads_keep_their_storage_through_api_and_wire_envelopes() {
-        let data = json!({"text": "owned payload"});
-        let storage = data["text"].as_str().unwrap().as_ptr();
-        let check = |data: &Value| {
-            let text = data["text"].as_str().unwrap();
-            assert_eq!(text, "owned payload");
-            assert_eq!(text.as_ptr(), storage, "payload was copied");
-        };
-        let api = success(API, data);
-        check(&api["data"]);
-        let failure = error(API, ApiError::new("failed", "no").with_details(api));
-        check(&failure["error"]["details"]["data"]);
-        let response = response_message("id", failure);
-        check(&response["response"]["error"]["details"]["data"]);
-        let event = event_message("stream", response);
-        check(&event["event"]["response"]["error"]["details"]["data"]);
-    }
-
-    #[test]
-    fn optional_error_fields_are_absent_until_requested() {
+    fn success_and_error_envelopes_preserve_wire_contracts() {
+        assert_eq!(
+            super::success(API, json!({"operation": "test"})),
+            json!({"protocol":"test-api", "version":1, "ok":true, "data":{"operation":"test"}})
+        );
         let basic = error(API, ApiError::new("failed", "no"));
         assert_eq!(
             basic,

@@ -407,6 +407,55 @@ async fn emit_line<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Resu
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::{BasicCorrelation, OutputHandle, spawn_output_actor_with_writer};
+    use anyhow::{Context, Result, ensure};
+    use serde_json::Value;
+    use tokio::{
+        io::{AsyncBufReadExt, BufReader, DuplexStream, Lines, duplex},
+        task::JoinHandle,
+    };
+
+    /// Small in-memory actor fixture; finish joins it and rejects unexpected output.
+    pub(crate) struct Output {
+        pub handle: OutputHandle,
+        task: JoinHandle<Result<()>>,
+        lines: Lines<BufReader<DuplexStream>>,
+    }
+
+    impl Output {
+        pub fn new() -> Self {
+            let (writer, reader) = duplex(8192);
+            let (handle, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 8, writer);
+            Self {
+                handle,
+                task,
+                lines: BufReader::new(reader).lines(),
+            }
+        }
+
+        pub async fn next(&mut self) -> Result<Value> {
+            let line = self
+                .lines
+                .next_line()
+                .await?
+                .context("expected output record")?;
+            Ok(serde_json::from_str(&line)?)
+        }
+
+        pub async fn finish(mut self) -> Result<()> {
+            drop(self.handle);
+            self.task.await??;
+            ensure!(
+                self.lines.next_line().await?.is_none(),
+                "unexpected output record"
+            );
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
 #[path = "routing_tests.rs"]
 mod routing_tests;
 
@@ -451,17 +500,6 @@ mod tests {
                 .response_id(&json!({"data": {"subscription": {"id": 42}}}))
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn id_query_returns_empty_when_actor_has_stopped() {
-        let (sender, receiver) = mpsc::channel(1);
-        drop(receiver);
-        let output = super::OutputHandle {
-            priority_sender: sender.clone(),
-            event_sender: sender,
-        };
-        assert!(output.active_ids().await.is_empty());
     }
 
     #[tokio::test]

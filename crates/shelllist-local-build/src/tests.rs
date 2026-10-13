@@ -13,7 +13,7 @@ use crate::{
     graph::{Source, Sources, prepare, validate_policy},
     lock::prune_lock,
     nix::{Inputs, Nix, Override, lock_command},
-    policy::{local_path, merge, nested_inputs, overlaid},
+    policy::{local_path, merge},
     snapshot::snapshot,
 };
 
@@ -133,65 +133,25 @@ impl Nix for TestNix {
 }
 
 #[test]
-fn dirty_files_deletions_and_ignored_targets() {
+fn snapshots_capture_dirty_files_preserve_metadata_and_confine_symlinks() {
     let repos = Repositories::new();
     let root = repos.repository(
         "project",
         json!({}),
         &[
-            ("source", "old"),
+            ("dir/source", "old"),
             ("deleted", "old"),
             (".gitignore", "target/\n"),
             ("readonly", "immutable"),
         ],
     );
-    fs::write(root.join("source"), "dirty").unwrap();
-    fs::set_permissions(root.join("readonly"), fs::Permissions::from_mode(0o444)).unwrap();
-    fs::set_permissions(root.join("source"), fs::Permissions::from_mode(0o755)).unwrap();
-    fs::remove_file(root.join("deleted")).unwrap();
-    fs::create_dir(root.join("target")).unwrap();
-    fs::write(root.join("target/large"), "ignored").unwrap();
-    let destination = repos.path("snapshot");
-    snapshot(&root, &destination).unwrap();
-    fs::write(root.join("source"), "later edit").unwrap();
-    assert_eq!(
-        fs::read_to_string(destination.join("source")).unwrap(),
-        "dirty"
-    );
-    assert_eq!(
-        fs::metadata(destination.join("source"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o755
-    );
-    for name in ["deleted", "target", ".git"] {
-        assert!(!destination.join(name).exists());
-    }
-}
-
-#[test]
-fn untracked_file_rejected() {
-    let repos = Repositories::new();
-    let root = repos.repository("project", json!({}), &[]);
     fs::write(root.join("forgotten.rs"), "new").unwrap();
-    error_contains(snapshot(&root, &repos.path("snapshot")), "Git-add");
-}
-
-#[test]
-fn escaping_symlink_rejected() {
-    let repos = Repositories::new();
-    let root = repos.repository("project", json!({}), &[]);
+    error_contains(snapshot(&root, &repos.path("untracked")), "Git-add");
+    fs::remove_file(root.join("forgotten.rs")).unwrap();
     symlink("../outside", root.join("outside")).unwrap();
     git(&root, &["add", "outside"]);
-    error_contains(snapshot(&root, &repos.path("snapshot")), "symlink escapes");
-}
-
-#[test]
-fn prepared_snapshot_preserves_internal_symlinks() {
-    let repos = Repositories::new();
-    let root = repos.repository("project", json!({}), &[("dir/source", "committed")]);
+    error_contains(snapshot(&root, &repos.path("escaped")), "symlink escapes");
+    fs::remove_file(root.join("outside")).unwrap();
     let links = [
         ("source-link", "dir/source"),
         ("dir-link", "dir"),
@@ -202,10 +162,16 @@ fn prepared_snapshot_preserves_internal_symlinks() {
         symlink(target, root.join(name)).unwrap();
     }
     git(&root, &["add", "."]);
+    fs::write(root.join("dir/source"), "dirty").unwrap();
+    fs::remove_file(root.join("deleted")).unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("target/large"), "ignored").unwrap();
+    fs::set_permissions(root.join("readonly"), fs::Permissions::from_mode(0o444)).unwrap();
     let frozen = repos.path("frozen");
     fs::set_permissions(root.join("dir/source"), fs::Permissions::from_mode(0o755)).unwrap();
     let original = fs::metadata(root.join("dir/source")).unwrap();
     snapshot(&root, &frozen).unwrap();
+    fs::write(root.join("dir/source"), "later edit").unwrap();
     let mut nix = TestNix::default();
     let result = prepare(&mut nix, &frozen, &repos.path("prepared"), true).unwrap();
     let prepared = &result.sources[&frozen];
@@ -222,6 +188,9 @@ fn prepared_snapshot_preserves_internal_symlinks() {
     );
     assert!(nix.stores.is_empty());
     for tree in [&frozen, prepared] {
+        for excluded in ["deleted", "target", ".git", "outside"] {
+            assert!(!tree.join(excluded).exists());
+        }
         let copied = fs::metadata(tree.join("dir/source")).unwrap();
         assert_eq!(copied.modified().unwrap(), original.modified().unwrap());
         assert_eq!(copied.permissions().mode(), original.permissions().mode());
@@ -229,7 +198,7 @@ fn prepared_snapshot_preserves_internal_symlinks() {
             assert_eq!(fs::read_link(tree.join(name)).unwrap(), Path::new(target));
         }
         for link in ["dir/relative", "dir-link/source"] {
-            assert_eq!(fs::read_to_string(tree.join(link)).unwrap(), "committed");
+            assert_eq!(fs::read_to_string(tree.join(link)).unwrap(), "dirty");
         }
     }
 }
@@ -276,47 +245,6 @@ fn branch_and_revision_pins_rejected() {
 }
 
 #[test]
-fn nested_overlays_are_borrowed_and_do_not_mutate_shared_inputs() {
-    let spec = json!({"inputs": {"dep": {"follows": "root"}}});
-    let overlay = nested_inputs(&spec).unwrap().unwrap();
-    assert!(std::ptr::eq(overlay, spec["inputs"].as_object().unwrap()));
-    let original = std::rc::Rc::new(inputs(json!({"dep": {"url": "git+file:../dep"}})));
-    let unchanged = overlaid(original.clone(), None);
-    assert!(std::rc::Rc::ptr_eq(&original, &unchanged));
-    let unchanged = overlaid(unchanged, Some(&Inputs::new()));
-    assert!(std::rc::Rc::ptr_eq(&original, &unchanged));
-    let effective = overlaid(unchanged, Some(overlay));
-    assert!(original["dep"].get("follows").is_none());
-    assert_eq!(effective["dep"]["follows"], "root");
-    assert!(nested_inputs(&json!({})).unwrap().is_none());
-    for invalid in [Value::Null, json!([]), json!("bad")] {
-        assert!(nested_inputs(&json!({"inputs": invalid})).is_err());
-    }
-}
-
-#[test]
-fn remote_lock_preserved_local_graph_removed() {
-    let lock = json!({"root":"root", "version":7, "nodes":{
-        "root":{"inputs":{"nixpkgs":"nixpkgs", "app-daemon":"app", "daemon-framework":"framework"}},
-        "app":{"inputs":{"daemonFramework":["daemon-framework"], "private":"private"}},
-        "framework":{"inputs":{"nixpkgs":["nixpkgs"]}},
-        "private":{"locked":{"rev":"old"}}, "nixpkgs":{"locked":{"rev":"keep-exactly"}}
-    }});
-    let result = prune_lock(lock, &["app-daemon".into(), "daemon-framework".into()]).unwrap();
-    assert_eq!(
-        result["nodes"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["nixpkgs", "root"]
-    );
-    assert_eq!(result["nodes"]["nixpkgs"]["locked"]["rev"], "keep-exactly");
-    assert_eq!(result["version"], 7);
-}
-
-#[test]
 fn one_snapshot_shared_by_all_edges_and_no_live_lock_write() {
     let repos = Repositories::new();
     let (root, app, framework) = repos.matrix();
@@ -359,25 +287,40 @@ fn one_snapshot_shared_by_all_edges_and_no_live_lock_write() {
 }
 
 #[test]
-fn shared_root_cannot_be_remote_pinned() {
+fn root_policy_rejects_pins_divergent_follows_and_standalone_framework_crates() {
     let repos = Repositories::new();
     let (root, app, framework) = repos.matrix();
-    let mut inputs = definitions(&root);
-    inputs["daemon-framework"]["url"] = json!("github:pmfleming/daemon-framework/old");
-    error_contains(
-        validate_policy(&sources(&[&app, &framework]), &inputs),
-        "current local",
+    let mut sources = sources(&[&app, &framework]);
+    for (overlay, reason) in [
+        (
+            json!({"daemon-framework":{"url":"github:pmfleming/daemon-framework/old"}}),
+            "current local",
+        ),
+        (
+            json!({"app-daemon":{"inputs":{"daemonFramework":{"follows":"wrong"}}}}),
+            "single root",
+        ),
+        (
+            json!({"shelllist-hyprland":{"url":"git+file:../shelllist-hyprland"}}),
+            "not a separate input",
+        ),
+        (
+            json!({"bar-daemon":{"inputs":{"hyprlandIpc":{"follows":"shelllist-hyprland"}}}}),
+            "not a separate input",
+        ),
+    ] {
+        let mut root_inputs = definitions(&root);
+        merge(&mut root_inputs, &inputs(overlay));
+        error_contains(validate_policy(&sources, &root_inputs), reason);
+    }
+    std::rc::Rc::make_mut(&mut sources.get_mut(&app).unwrap().inputs).insert(
+        "hyprlandIpc".into(),
+        json!({"url":"git+file:../shelllist-hyprland"}),
     );
-}
-
-#[test]
-fn private_or_vendored_framework_rejected() {
-    let repos = Repositories::new();
-    let (root, app, framework) = repos.matrix();
-    let sources = sources(&[&app, &framework]);
-    validate_policy(&sources, &definitions(&root)).unwrap();
-    fs::create_dir_all(app.join("vendor/daemon-framework")).unwrap();
-    error_contains(validate_policy(&sources, &definitions(&root)), "vendored");
+    error_contains(
+        validate_policy(&sources, &definitions(&root)),
+        "not a separate input",
+    );
 }
 
 #[test]
@@ -390,10 +333,15 @@ fn hyprland_consumers_require_the_framework_crate() {
         Value::Object(definitions(&app)),
         &[("Cargo.toml", &manifest)],
     );
-    let sources = sources(&[&app, &bar, &framework]);
+    let valid = "shelllist-hyprland = { path = \"../daemon-framework/crates/shelllist-hyprland\" }";
+    let bt = repos.repository(
+        "bt-daemon",
+        Value::Object(definitions(&app)),
+        &[("Cargo.toml", &manifest.replace(valid, ""))],
+    );
+    let sources = sources(&[&app, &bar, &bt, &framework]);
     let root_inputs = definitions(&root);
     validate_policy(&sources, &root_inputs).unwrap();
-    let valid = "shelllist-hyprland = { path = \"../daemon-framework/crates/shelllist-hyprland\" }";
     for consumer in [&app, &bar] {
         for invalid in [
             "shelllist-hyprland = { path = \"../shelllist-hyprland\" }",
@@ -413,81 +361,34 @@ fn hyprland_consumers_require_the_framework_crate() {
             );
         }
         fs::write(consumer.join("Cargo.toml"), &manifest).unwrap();
-        fs::create_dir_all(consumer.join("vendor/shelllist-hyprland")).unwrap();
-        error_contains(validate_policy(&sources, &root_inputs), "vendored");
-        fs::remove_dir(consumer.join("vendor/shelllist-hyprland")).unwrap();
+        for private in ["vendor/daemon-framework", "vendor/shelllist-hyprland"] {
+            fs::create_dir_all(consumer.join(private)).unwrap();
+            error_contains(validate_policy(&sources, &root_inputs), "vendored");
+            fs::remove_dir(consumer.join(private)).unwrap();
+        }
     }
 }
 
 #[test]
-fn non_hyprland_daemon_does_not_require_the_crate() {
-    let repos = Repositories::new();
-    let (root, app, framework) = repos.matrix();
-    let manifest = fs::read_to_string(app.join("Cargo.toml"))
-        .unwrap()
-        .lines()
-        .filter(|line| !line.starts_with("shelllist-hyprland"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let bt = repos.repository(
-        "bt-daemon",
-        Value::Object(definitions(&app)),
-        &[("Cargo.toml", &manifest)],
-    );
-    validate_policy(&sources(&[&bt, &framework]), &definitions(&root)).unwrap();
-}
-
-#[test]
-fn standalone_hyprland_inputs_rejected() {
-    let repos = Repositories::new();
-    let (root, app, framework) = repos.matrix();
-    let mut sources = sources(&[&app, &framework]);
-    for extra in [
-        json!({"shelllist-hyprland":{"url":"git+file:../shelllist-hyprland"}}),
-        json!({"bar-daemon":{"inputs":{"hyprlandIpc":{"follows":"shelllist-hyprland"}}}}),
-        json!({"shelllist":{"inputs":{"shelllist-hyprland":{"follows":"shelllist-hyprland"}}}}),
-    ] {
-        let mut root_inputs = definitions(&root);
-        merge(&mut root_inputs, &inputs(extra));
-        error_contains(
-            validate_policy(&sources, &root_inputs),
-            "not a separate input",
-        );
-    }
-    std::rc::Rc::make_mut(&mut sources.get_mut(&app).unwrap().inputs).insert(
-        "hyprlandIpc".into(),
-        json!({"url":"git+file:../shelllist-hyprland"}),
-    );
-    error_contains(
-        validate_policy(&sources, &definitions(&root)),
-        "not a separate input",
-    );
-}
-
-#[test]
-fn missing_root_follows_rejected() {
-    let repos = Repositories::new();
-    let (root, app, framework) = repos.matrix();
-    let mut inputs = definitions(&root);
-    inputs["app-daemon"]
-        .as_object_mut()
-        .unwrap()
-        .remove("inputs");
-    error_contains(
-        validate_policy(&sources(&[&app, &framework]), &inputs),
-        "single root",
-    );
-}
-
-#[test]
-fn lock_follows_resolve_from_root_and_cycles_are_rejected() {
-    let lock = json!({"root":"root", "nodes": {
-        "root":{"inputs":{"a":"a", "alias":["a", "dep"]}},
+fn lock_pruning_preserves_remote_pins_resolves_follows_and_rejects_cycles() {
+    let lock = json!({"root":"root", "version":7, "nodes": {
+        "root":{"inputs":{"local":"local", "a":"a", "alias":["a", "dep"]}},
+        "local":{"inputs":{"private":"private"}}, "private":{"locked":{"rev":"old"}},
         "a":{"inputs":{"dep":"remote"}}, "remote":{"locked":{"rev":"keep"}}, "unused":{}
     }});
-    let result = prune_lock(lock, &[]).unwrap();
-    assert!(result["nodes"].get("unused").is_none());
+    let result = prune_lock(lock, &["local".into()]).unwrap();
+    assert_eq!(
+        result["nodes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["a", "remote", "root"]
+    );
+    assert!(result["nodes"]["root"]["inputs"].get("local").is_none());
     assert_eq!(result["nodes"]["remote"]["locked"]["rev"], "keep");
+    assert_eq!(result["version"], 7);
     error_contains(
         prune_lock(
             json!({"root":"root", "nodes":{"root":{"inputs":{"a":["b"], "b":["a"]}}}}),
@@ -609,6 +510,17 @@ fn preflight_walks_distinct_overlays_and_rejects_cycles() {
     )
     .unwrap();
     error_contains(crate::preflight::preflight(&mut nix, &root), "cycle");
+    for invalid in [Value::Null, json!([]), json!("bad")] {
+        fs::write(
+            root.join("inputs.json"),
+            json!({"sibling": {"url":"git+file:../sibling", "inputs":invalid}}).to_string(),
+        )
+        .unwrap();
+        error_contains(
+            crate::preflight::preflight(&mut nix, &root),
+            "input overrides must be an object",
+        );
+    }
 }
 
 #[test]

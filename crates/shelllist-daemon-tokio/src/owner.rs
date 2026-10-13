@@ -175,13 +175,17 @@ mod tests {
     use super::{OwnerLossError, OwnerLossReceiver};
     use tokio::sync::{broadcast, watch};
     #[tokio::test]
-    async fn stopped_monitor_wakes_existing_and_late_receivers() {
+    async fn lag_is_explicit_and_dropped_monitor_is_terminal() {
         let (losses, receiver) = broadcast::channel(1);
         let (stopped, state) = watch::channel(false);
         let mut receiver = OwnerLossReceiver {
             losses: receiver,
             stopped: state.clone(),
         };
+        losses.send(":1.1".into()).unwrap();
+        losses.send(":1.2".into()).unwrap();
+        assert_eq!(receiver.recv().await, Err(OwnerLossError::Lagged(1)));
+        assert_eq!(receiver.recv().await.unwrap(), ":1.2");
         stopped.send_replace(true);
         assert_eq!(receiver.recv().await, Err(OwnerLossError::Stopped));
         let mut late = OwnerLossReceiver {
@@ -189,19 +193,7 @@ mod tests {
             stopped: state,
         };
         assert_eq!(late.recv().await, Err(OwnerLossError::Stopped));
-    }
-    #[tokio::test]
-    async fn lag_is_explicit_and_dropped_monitor_is_terminal() {
-        let (losses, receiver) = broadcast::channel(1);
-        let (stopped, state) = watch::channel(false);
-        let mut receiver = OwnerLossReceiver {
-            losses: receiver,
-            stopped: state,
-        };
-        losses.send(":1.1".into()).unwrap();
-        losses.send(":1.2".into()).unwrap();
-        assert_eq!(receiver.recv().await, Err(OwnerLossError::Lagged(1)));
-        assert_eq!(receiver.recv().await.unwrap(), ":1.2");
+        stopped.send_replace(false);
         drop(stopped);
         assert_eq!(receiver.recv().await, Err(OwnerLossError::Stopped));
     }

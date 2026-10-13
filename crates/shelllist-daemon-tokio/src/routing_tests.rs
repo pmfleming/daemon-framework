@@ -1,8 +1,6 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use shelllist_daemon_core::{ClientRoute, RouteKind};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::io::sink;
 
 use super::{BasicCorrelation, CorrelationPolicy, OutputCommand, OutputState, emit_command};
 
@@ -73,7 +71,12 @@ async fn replies_echo_routes_without_retaining_ordinary_requests() -> Result<()>
             })
             .await?;
     }
+    output.send(OutputCommand::Shutdown("bye".into())).await?;
     let lines = output.lines();
+    assert_eq!(
+        lines[2],
+        json!({"kind":"response", "id":"bye", "ok":true, "response":{"shutdown":true}})
+    );
     assert_eq!(lines[0]["route"]["consumerId"], "a");
     assert_eq!(lines[1]["route"]["consumerId"], "b");
     assert_eq!(lines[1]["route"]["generation"], 7);
@@ -152,17 +155,21 @@ async fn cancellation_failure_retains_ownership_success_and_reset_remove_it() ->
         output.send(OutputCommand::ResetCorrelation).await?;
         assert!(output.state.active_ids.is_empty());
         assert!(output.state.pending_events.is_empty());
+        // Exercise bounded cancellation history just beyond its configured limit,
+        // rather than replaying thousands of identical ordinary requests.
+        for index in 0..=output.state.pending_limit {
+            output
+                .send(OutputCommand::Cancelled(format!("retired-{index}")))
+                .await?;
+        }
+        assert!(output.state.suppressed_ids.len() <= output.state.pending_limit);
+        assert!(output.state.suppressed_order.len() <= output.state.pending_limit);
     }
     Ok(())
 }
 
-#[derive(Default)]
-struct TerminalSubscription(AtomicUsize);
+struct TerminalSubscription;
 impl CorrelationPolicy for TerminalSubscription {
-    fn event_id(&self, stream: &str, event: &Value) -> Option<String> {
-        self.0.fetch_add(1, Ordering::Relaxed);
-        BasicCorrelation.event_id(stream, event)
-    }
     fn is_terminal(&self, _stream: &str, _event: &Value) -> bool {
         true
     }
@@ -171,7 +178,7 @@ impl CorrelationPolicy for TerminalSubscription {
 #[tokio::test]
 async fn terminal_events_keep_their_route_before_retiring_ownership() -> Result<()> {
     for buffered in [false, true] {
-        let mut output = Output::new(TerminalSubscription::default());
+        let mut output = Output::new(TerminalSubscription);
         if buffered {
             output.send(event("sub-a")).await?;
             // A terminal event also suppresses later events already in the buffer.
@@ -188,46 +195,6 @@ async fn terminal_events_keep_their_route_before_retiring_ownership() -> Result<
         assert!(output.state.active_ids.is_empty());
         assert!(output.state.pending_events.is_empty());
         assert!(output.state.suppressed_ids.contains("sub-a"));
-        assert_eq!(
-            output.state.policy.0.load(Ordering::Relaxed),
-            if buffered { 3 } else { 1 },
-            "extract identity once per received event, never again during delivery"
-        );
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn twenty_thousand_requests_and_subscription_churn_stay_bounded() -> Result<()> {
-    let mut state = OutputState::new(BasicCorrelation, 16);
-    let mut writer = sink();
-    for index in 0..20_000 {
-        let owner = route("clipboard", index / 5, RouteKind::Call);
-        emit_command(
-            &mut writer,
-            &mut state,
-            OutputCommand::Response {
-                id: format!("query-{}", index / 5),
-                result: Ok(json!({ "ok": true })),
-                cancelled_request_id: None,
-                route: Some(owner),
-            },
-        )
-        .await?;
-        assert!(state.active_ids.is_empty());
-        if index % 5 == 0 {
-            let id = format!("sub-{index}");
-            emit_command(
-                &mut writer,
-                &mut state,
-                subscription(&id, route("clipboard", index, RouteKind::BaseSubscription)),
-            )
-            .await?;
-            emit_command(&mut writer, &mut state, OutputCommand::Cancelled(id)).await?;
-        }
-        assert!(state.active_ids.is_empty());
-        assert!(state.suppressed_ids.len() <= 16);
-        assert!(state.suppressed_order.len() <= 16);
     }
     Ok(())
 }

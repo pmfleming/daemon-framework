@@ -283,6 +283,17 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(registry.state.lock().unwrap().tasks.iter().count(), 0);
+        let marker = Arc::new(());
+        let held = marker.clone();
+        registry
+            .spawn_until("pending".into(), None, pending(), async move {
+                let _held = held;
+                pending::<()>().await;
+            })
+            .unwrap();
+        drop(registry);
+        tokio::task::yield_now().await;
+        assert_eq!(Arc::strong_count(&marker), 1);
     }
 
     #[tokio::test]
@@ -297,21 +308,5 @@ mod tests {
             .unwrap();
         tokio::task::yield_now().await;
         assert!(registry.cancel_owned("id", None).await);
-    }
-
-    #[tokio::test]
-    async fn dropping_registry_releases_workers() {
-        let registry = OwnedTaskRegistry::default();
-        let marker = Arc::new(());
-        let held = marker.clone();
-        registry
-            .spawn_until("id".into(), None, pending(), async move {
-                let _held = held;
-                pending::<()>().await;
-            })
-            .unwrap();
-        drop(registry);
-        tokio::task::yield_now().await;
-        assert_eq!(Arc::strong_count(&marker), 1);
     }
 }

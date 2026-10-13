@@ -142,79 +142,29 @@ pub fn shutdown_message(id: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
-
-    use super::{
-        ClientMessage, ClientRequest, RouteKind, addressed_message, response_message,
-        shutdown_message,
-    };
+    use super::ClientMessage;
+    use serde_json::json;
 
     #[test]
-    fn routing_is_optional_typed_and_bridge_local() -> serde_json::Result<()> {
-        let legacy: ClientMessage = serde_json::from_value(json!({
-            "op": "call", "id": "1", "method": "things.get"
-        }))?;
-        legacy.validate().unwrap();
-        assert!(legacy.route.is_none());
-        let route =
-            json!({ "consumerId": "view", "localId": "page", "kind": "call", "generation": 4 });
-        let message: ClientMessage = serde_json::from_value(json!({
-            "op": "call", "id": "view::page", "method": "things.get", "route": route
-        }))?;
-        message.validate().unwrap();
-        assert_eq!(message.route.as_ref().unwrap().kind, RouteKind::Call);
-        let reply = response_message("view::page", json!({ "data": {} }));
-        assert!(
-            addressed_message(reply.clone(), None)
-                .get("route")
-                .is_none()
-        );
-        assert_eq!(
-            addressed_message(reply, message.route.as_ref())["route"],
-            route
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_mismatched_or_unbounded_route_metadata() -> serde_json::Result<()> {
-        for (op, kind, consumer) in [
-            ("call", "control", "view".into()),
-            ("subscribe", "call", "view".into()),
-            ("release", "call", "view".into()),
-            ("call", "call", "".into()),
-            ("call", "call", "v".repeat(257)),
+    fn validates_route_kinds_and_identifier_bounds() -> serde_json::Result<()> {
+        for (op, kind, consumer, valid) in [
+            ("call", "call", "view".into(), true),
+            ("subscribe", "subscription", "view".into(), true),
+            ("release", "control", "view".into(), true),
+            ("call", "control", "view".into(), false),
+            ("subscribe", "call", "view".into(), false),
+            ("release", "call", "view".into(), false),
+            ("call", "call", "".into(), false),
+            ("call", "call", "v".repeat(257), false),
         ] {
             let message: ClientMessage = serde_json::from_value(json!({
                 "op": op, "id": "1", "method": "things.get",
                 "route": { "consumerId": consumer, "localId": "1", "generation": 0, "kind": kind }
             }))?;
-            assert!(message.validate().is_err());
+            assert_eq!(message.validate().is_ok(), valid, "{op}/{kind}");
         }
         let release: ClientMessage = serde_json::from_value(json!({ "op": "release", "id": "1" }))?;
         assert!(release.validate().is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn request_defaults_and_wire_names_are_stable() -> serde_json::Result<()> {
-        assert_eq!(
-            serde_json::from_str::<ClientRequest>(
-                r#"{"op":"call","id":"1","method":"things.get"}"#
-            )?,
-            ClientRequest::Call {
-                id: "1".into(),
-                method: "things.get".into(),
-                params: Value::Null,
-            }
-        );
-        assert_eq!(
-            shutdown_message("bye"),
-            json!({
-                "kind": "response", "id": "bye", "ok": true,
-                "response": { "shutdown": true }
-            })
-        );
         Ok(())
     }
 }

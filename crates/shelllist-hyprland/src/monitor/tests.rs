@@ -11,7 +11,7 @@ fn configured<'a>(mode: Mode<'a>, scale: f64, transform: Option<u8>, mirror: &'a
 }
 
 #[test]
-fn exact_rules_explicitly_enable_and_clear_previous_mirroring() {
+fn rules_encode_enablement_geometry_and_explicit_mirroring() {
     for name in ["eDP-1", "DP-1", "HDMI-A-1", "HEADLESS-1", "Virtual_2"] {
         assert_eq!(
             command(name, Rule::Disable).unwrap(),
@@ -26,10 +26,6 @@ fn exact_rules_explicitly_enable_and_clear_previous_mirroring() {
             );
         }
     }
-}
-
-#[test]
-fn preferred_auto_restore_clears_disabled_but_preserves_unspecified_transform() {
     let command = command(
         "eDP-1",
         Rule::Enable {
@@ -37,36 +33,14 @@ fn preferred_auto_restore_clears_disabled_but_preserves_unspecified_transform() 
             position: Position::Auto,
             scale: 1.25,
             transform: None,
-            mirror: "",
+            mirror: "DP-1",
         },
     )
     .unwrap();
     assert_eq!(
         command,
-        "eval hl.monitor({ output = \"eDP-1\", disabled = false, mode = \"preferred\", position = \"auto\", scale = 1.25, mirror = \"\" })"
+        "eval hl.monitor({ output = \"eDP-1\", disabled = false, mode = \"preferred\", position = \"auto\", scale = 1.25, mirror = \"DP-1\" })"
     );
-}
-
-#[test]
-fn mirrored_rules_and_geometry_do_not_import_daemon_policy_limits() {
-    let encoded = command(
-        "HEADLESS-1",
-        Rule::Enable {
-            mode: Mode::Exact("20000x18000@2000Hz"),
-            position: Position::Exact {
-                x: i32::MIN,
-                y: i32::MAX,
-            },
-            scale: 0.125,
-            transform: Some(7),
-            mirror: "DP-1",
-        },
-    )
-    .unwrap();
-    assert!(encoded.contains("disabled = false"));
-    assert!(encoded.contains("mode = \"20000x18000@2000\""));
-    assert!(encoded.contains("position = \"-2147483648x2147483647\""));
-    assert!(encoded.contains("scale = 0.125, transform = 7, mirror = \"DP-1\""));
 }
 
 #[test]
@@ -134,19 +108,4 @@ fn mode_scale_and_transform_validation_rejects_invalid_commands() {
             .is_err()
         );
     }
-}
-
-#[tokio::test]
-async fn encoded_monitor_rule_uses_exact_native_transport() {
-    let (_root, client, server) = crate::tests::command_server(
-        "eval hl.monitor({ output = \"DP-1\", disabled = false, mode = \"1920x1200@60.00\", position = \"-1920x120\", scale = 1.25, transform = 0, mirror = \"\" })",
-        "ok",
-    ).await;
-    let command = command(
-        "DP-1",
-        configured(Mode::Exact("1920x1200@60.00Hz"), 1.25, Some(0), ""),
-    )
-    .unwrap();
-    assert_eq!(client.request_exact(&command).await.unwrap(), "ok");
-    server.await.unwrap();
 }

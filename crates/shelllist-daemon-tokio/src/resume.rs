@@ -115,28 +115,20 @@ async fn logind_connection(sender: &mpsc::Sender<()>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResumeDetector, logind_events, monitor_resumes, suspend_offset};
+    use super::{ResumeDetector, logind_events, monitor_resumes};
     use std::time::Duration;
     use tokio::sync::watch;
     #[test]
-    fn short_sleep_signal_and_clock_fallback_are_deduplicated() {
+    fn resume_detection_ignores_stalls_and_deduplicates_signal_and_clock() {
         let mut detector = ResumeDetector::default();
         assert!(!detector.poll(Some(0)));
+        assert!(!detector.poll(Some(0)));
+        assert!(!detector.poll(None));
         assert!(detector.signal(Some(100_000_000)));
         assert!(!detector.poll(Some(100_000_000)));
         assert!(detector.poll(Some(5_100_000_000)));
         assert!(!detector.signal(Some(5_100_000_000)));
         assert!(detector.signal(Some(10_100_000_000)));
-    }
-    #[test]
-    fn startup_stalls_and_wall_clock_changes_are_not_resumes() {
-        let mut detector = ResumeDetector::default();
-        assert!(!detector.poll(Some(123_000_000_000)));
-        for _ in 0..10 {
-            assert!(!detector.poll(Some(123_000_000_000)));
-        }
-        assert!(!detector.poll(None));
-        assert!(suspend_offset().is_some());
     }
     #[tokio::test]
     async fn monitors_stop_without_consumers() {

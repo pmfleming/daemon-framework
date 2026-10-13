@@ -91,7 +91,7 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
-fn approval_capture_preserves_original_lock_before_resolution() {
+fn prepare_capture_and_prune_preserve_locks_and_machine_readable_contracts() {
     let fixture = Fixture::new();
     fs::write(fixture.root.join("flake.lock"), "{\"original\": true}\n").unwrap();
     assert!(
@@ -103,7 +103,7 @@ fn approval_capture_preserves_original_lock_before_resolution() {
             .unwrap()
             .success()
     );
-    let destination = fixture.root.parent().unwrap().join("captured");
+    let destination = fixture._temporary.path().join("captured");
     let output = fixture
         .command()
         .arg("prepare")
@@ -114,77 +114,24 @@ fn approval_capture_preserves_original_lock_before_resolution() {
         .unwrap();
     assert_success(&output);
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(destination.join("sources.json")).unwrap()).unwrap();
+    assert_eq!(saved, result);
+    assert!(result["storeSources"].as_object().unwrap().is_empty());
     assert_eq!(
         result["originalRoot"],
         destination.join(".approval-root").to_str().unwrap()
     );
-    assert_eq!(
-        fs::read_to_string(destination.join(".approval-root/flake.lock")).unwrap(),
-        "{\"original\": true}\n"
-    );
+    for path in [
+        fixture.root.join("flake.lock"),
+        destination.join(".approval-root/flake.lock"),
+    ] {
+        assert_eq!(fs::read_to_string(path).unwrap(), "{\"original\": true}\n");
+    }
     assert_eq!(
         fs::read_to_string(destination.join("root/flake.lock")).unwrap(),
         "{}\n"
     );
-    assert_eq!(
-        fs::read_to_string(fixture.root.join("flake.lock")).unwrap(),
-        "{\"original\": true}\n"
-    );
-}
-
-#[test]
-fn invocation_uses_frozen_lock_forwards_arguments_and_cleans_up_on_success_or_failure() {
-    let fixture = Fixture::new();
-    for (action, status) in [("check", 0), ("build", 0), ("develop", 17), ("run", 0)] {
-        fs::write(&fixture.log, "").unwrap();
-        let output = fixture
-            .command()
-            .env("LOCAL_BUILD_TEST_EXIT", status.to_string())
-            .arg(action)
-            .arg(&fixture.root)
-            .args(["--", "--test-option", "two words"])
-            .output()
-            .unwrap();
-        assert_eq!(
-            output.status.success(),
-            status == 0,
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let log = fixture.log();
-        assert!(log.contains("--no-update-lock-file\n"));
-        assert!(log.ends_with("--test-option\ntwo words\n"));
-        assert!(log.contains("--\n") == (action == "run"));
-        for flake in log.lines().filter_map(|line| line.strip_prefix("path:")) {
-            assert!(
-                !Path::new(flake).exists(),
-                "temporary graph survived {action}"
-            );
-        }
-        assert!(!fixture.root.join("flake.lock").exists());
-    }
-}
-
-#[test]
-fn prepare_and_prune_lock_keep_machine_readable_contracts() {
-    let fixture = Fixture::new();
-    let destination = fixture._temporary.path().join("prepared");
-    let output = fixture
-        .command()
-        .arg("prepare")
-        .arg(&fixture.root)
-        .arg(&destination)
-        .output()
-        .unwrap();
-    assert_success(&output);
-    let prepared: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let saved: serde_json::Value =
-        serde_json::from_slice(&fs::read(destination.join("sources.json")).unwrap()).unwrap();
-    assert_eq!(saved, prepared);
-    assert!(prepared["storeSources"].as_object().unwrap().is_empty());
-    assert!(destination.join("root/flake.lock").is_file());
-    assert!(!fixture.root.join("flake.lock").exists());
-    // No local inputs: only unreachable nodes should be removed.
     let lock = fixture._temporary.path().join("explicit.lock");
     fs::write(&lock, r#"{"version":7,"root":"root","nodes":{"root":{"inputs":{"dep":"dep"}},"dep":{"locked":{"rev":"keep"}},"unused":{}}}"#).unwrap();
     assert_success(
@@ -202,16 +149,79 @@ fn prepare_and_prune_lock_keep_machine_readable_contracts() {
 }
 
 #[test]
+fn invocation_uses_frozen_lock_forwards_arguments_and_cleans_up_on_success_or_failure() {
+    let fixture = Fixture::new();
+    for (action, status) in [("check", 0), ("build", 0), ("develop", 17), ("run", 0)] {
+        fs::write(&fixture.log, "").unwrap();
+        let mut command = fixture.command();
+        command
+            .env("LOCAL_BUILD_TEST_EXIT", status.to_string())
+            .arg(action);
+        if action != "check" {
+            command.args(["--attr", "chosen"]);
+        }
+        command
+            .arg(&fixture.root)
+            .args(["--", "--keep-going", "two words"]);
+        if action == "run" {
+            command.args(["--help", "--attr", "child-option"]);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            status == 0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let log = fixture.log();
+        let prefix = if action == "check" {
+            "flake\ncheck"
+        } else {
+            action
+        };
+        assert!(log.contains(&format!("{prefix}\npath:")));
+        assert!(log.contains("--no-update-lock-file\n"));
+        assert!(log.contains("--keep-going\ntwo words\n"));
+        assert_eq!(log.contains("#chosen\n"), action != "check");
+        assert_eq!(log.contains("--\n"), action == "run");
+        if action == "run" {
+            assert!(log.ends_with("--help\n--attr\nchild-option\n"));
+        }
+        for flake in log.lines().filter_map(|line| line.strip_prefix("path:")) {
+            let path = flake.split_once('#').map_or(flake, |(path, _)| path);
+            assert!(
+                !Path::new(path).exists(),
+                "temporary graph survived {action}"
+            );
+        }
+        assert!(!fixture.root.join("flake.lock").exists());
+    }
+}
+
+#[test]
 fn override_rejection_precedes_any_nix_process() {
     let fixture = Fixture::new();
-    let output = fixture
-        .command()
-        .arg("check")
-        .arg(&fixture.root)
-        .arg("--override-input=private")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("single-snapshot guarantee"));
-    assert!(!fixture.log.exists());
+    for flag in [
+        "--override-input",
+        "--update-input",
+        "--recreate-lock-file",
+        "--override-flake",
+        "--flake",
+    ] {
+        for argument in [flag.to_owned(), format!("{flag}=elsewhere")] {
+            let output = fixture
+                .command()
+                .arg("check")
+                .arg(&fixture.root)
+                .arg(&argument)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{argument}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("single-snapshot guarantee"),
+                "{argument}"
+            );
+            assert!(!fixture.log.exists());
+        }
+    }
 }

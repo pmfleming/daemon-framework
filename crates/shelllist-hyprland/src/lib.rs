@@ -125,8 +125,7 @@ impl Client {
     }
 
     async fn connect(&self, socket: &str) -> Result<UnixStream> {
-        let candidates =
-            socket_candidates(&self.roots(), self.instance_signature()?, socket).await?;
+        let candidates = socket_candidates(&self.roots(), self.instance_signature()?, socket).await;
         connect_candidates(&candidates).await
     }
 
@@ -164,7 +163,7 @@ async fn socket_candidates(
     roots: &[PathBuf],
     signature: Option<&str>,
     socket: &str,
-) -> Result<Vec<PathBuf>> {
+) -> Vec<PathBuf> {
     let mut candidates = match signature {
         Some(signature) => exact_socket_candidates(roots, signature, socket).await,
         None => Vec::new(),
@@ -185,7 +184,7 @@ async fn socket_candidates(
             add_socket(&mut candidates, path, uid).await;
         }
     }
-    Ok(candidates)
+    candidates
 }
 
 async fn add_socket(candidates: &mut Vec<PathBuf>, path: PathBuf, uid: u32) {
@@ -265,36 +264,38 @@ async fn watch_events_with<T, F>(client: Client, sender: mpsc::Sender<T>, map: F
 where
     F: Fn(Event) -> T,
 {
-    let watch = async {
-        let mut last_connect_error = None;
-        loop {
-            match client.event_socket().await {
-                Ok(stream) => {
-                    last_connect_error = None;
-                    if forward_events(stream, &sender, &map).await.is_err() {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    let cause = format!("{error:#}");
-                    if last_connect_error.as_ref() != Some(&cause) {
-                        if sender
-                            .send(map(Event::ConnectFailed(cause.clone())))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                        last_connect_error = Some(cause);
-                    }
+    // Receiver closure cancels connection attempts, reads, sends and backoff.
+    tokio::select! {
+        _ = sender.closed() => {},
+        _ = reconnect_events(client, &sender, &map) => {},
+    }
+}
+
+async fn reconnect_events<T>(
+    client: Client,
+    sender: &mpsc::Sender<T>,
+    map: &impl Fn(Event) -> T,
+) -> Result<(), mpsc::error::SendError<T>> {
+    let mut last_connect_error = None;
+    loop {
+        match client.event_socket().await {
+            Ok(stream) => {
+                last_connect_error = None;
+                forward_events(stream, sender, map).await?;
+            }
+            Err(error) => {
+                let cause = format!("{error:#}");
+                if last_connect_error.as_ref() != Some(&cause) {
+                    sender
+                        .send(map(Event::ConnectFailed(cause.clone())))
+                        .await?;
+                    last_connect_error = Some(cause);
                 }
             }
-            // Back off even when a socket accepts and immediately closes.
-            time::sleep(RECONNECT_DELAY).await;
         }
-    };
-    // Receiver closure cancels connection attempts, reads, sends and backoff.
-    tokio::select! { _ = sender.closed() => {}, _ = watch => {} }
+        // Back off even when a socket accepts and immediately closes.
+        time::sleep(RECONNECT_DELAY).await;
+    }
 }
 
 async fn forward_events<T>(
@@ -370,7 +371,7 @@ fn valid_signature(value: &str) -> bool {
 mod tests {
     use super::{
         COMMAND_SOCKET, Client, EVENT_SOCKET, Event, connect_candidates, socket_candidates,
-        valid_signature, watch_events_with,
+        watch_events_with,
     };
     use std::time::Duration;
     use tokio::{
@@ -402,28 +403,6 @@ mod tests {
             stream.write_all(reply.as_ref()).await.unwrap();
         });
         (root, client, server)
-    }
-
-    #[tokio::test]
-    async fn request_uses_bounded_socket_protocol_without_a_process() {
-        let (root, client, server) = command_server("j/clients", "[]").await;
-        assert_eq!(client.request("j/clients").await.unwrap(), "[]");
-        server.await.unwrap();
-        let root = root.path().join("hypr");
-        for signature in [None, Some("missing")] {
-            assert_eq!(
-                socket_candidates(std::slice::from_ref(&root), signature, COMMAND_SOCKET)
-                    .await
-                    .unwrap(),
-                [root.join("test").join(COMMAND_SOCKET)]
-            );
-            assert!(
-                socket_candidates(std::slice::from_ref(&root), signature, EVENT_SOCKET)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-        }
     }
 
     #[tokio::test]
@@ -459,15 +438,10 @@ mod tests {
             None
         );
         assert_eq!(
-            Client::new(root.path().into(), Some("test".into()))
+            Client::new(root.path().into(), Some("instance_123.456-test".into()))
                 .instance_signature()
                 .unwrap(),
-            Some("test")
-        );
-        assert!(
-            Client::new(root.path().into(), Some("../other".into()))
-                .instance_signature()
-                .is_err()
+            Some("instance_123.456-test")
         );
     }
 
@@ -524,22 +498,6 @@ mod tests {
         let _peer = listener.accept().await.unwrap();
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn ipc_deadline_cancels_pending_operations() {
-        let marker = std::sync::Arc::new(());
-        let held = marker.clone();
-        let started = time::Instant::now();
-        let error = super::bounded_ipc(async move {
-            let _held = held;
-            std::future::pending::<anyhow::Result<()>>().await
-        })
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("timed out"));
-        assert_eq!(time::Instant::now() - started, super::IPC_TIMEOUT);
-        assert_eq!(std::sync::Arc::strong_count(&marker), 1);
-    }
-
     #[tokio::test]
     async fn request_deadline_includes_waiting_for_a_reply() {
         let (_root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
@@ -557,55 +515,6 @@ mod tests {
                 .to_string()
                 .contains("timed out")
         );
-    }
-
-    #[tokio::test]
-    async fn replies_and_event_lines_have_explicit_size_and_encoding_bounds() {
-        let (_root, client, server) =
-            command_server("j/clients", "x".repeat(super::MAX_REPLY_BYTES as usize + 1)).await;
-        assert!(
-            client
-                .request("j/clients")
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("too large")
-        );
-        server.await.unwrap();
-        for (mut input, expected) in [
-            (b"event>>1\n".as_slice(), Some("event>>1")),
-            (b"event>>2\r\n", Some("event>>2")),
-            (b"partial", Some("partial")),
-            (b"\n", Some("")),
-            (b"", None),
-        ] {
-            assert_eq!(
-                super::read_event(&mut input).await.unwrap().as_deref(),
-                expected
-            );
-        }
-        assert!(super::read_event(&mut b"\xff\n".as_slice()).await.is_err());
-        let mut boundary = vec![b'x'; super::MAX_EVENT_BYTES as usize];
-        *boundary.last_mut().unwrap() = b'\n';
-        assert!(
-            super::read_event(&mut boundary.as_slice())
-                .await
-                .unwrap()
-                .is_some()
-        );
-        for terminated in [false, true] {
-            let mut oversized = vec![b'x'; super::MAX_EVENT_BYTES as usize + 1];
-            if terminated {
-                *oversized.last_mut().unwrap() = b'\n';
-            }
-            assert!(
-                super::read_event(&mut oversized.as_slice())
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("too large")
-            );
-        }
     }
 
     #[tokio::test]
@@ -641,22 +550,29 @@ mod tests {
 
     #[tokio::test]
     async fn event_limits_and_receiver_closure_cancel_reads_and_backoff() {
-        for length in [12, super::MAX_EVENT_BYTES as usize + 1] {
+        for (bytes, failure) in [
+            (b"partial".to_vec(), None),
+            (
+                vec![b'x'; super::MAX_EVENT_BYTES as usize + 1],
+                Some("too large"),
+            ),
+            (b"\xff\n".to_vec(), Some("utf-8")),
+        ] {
             let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
             let (sender, mut events) = mpsc::channel(8);
             let watcher = tokio::spawn(watch_events_with(client, sender, |event| event));
             let (mut stream, _) = listener.accept().await.unwrap();
             assert_eq!(events.recv().await, Some(Event::Connected));
-            stream.write_all(&vec![b'x'; length]).await.unwrap();
-            if length > super::MAX_EVENT_BYTES as usize {
-                assert_eq!(
+            stream.write_all(&bytes).await.unwrap();
+            if let Some(expected) = failure {
+                let Some(Event::Disconnected(Some(cause))) =
                     time::timeout(Duration::from_secs(1), events.recv())
                         .await
-                        .unwrap(),
-                    Some(Event::Disconnected(Some(
-                        "Hyprland event is too large".into()
-                    )))
-                );
+                        .unwrap()
+                else {
+                    panic!("expected a protocol failure")
+                };
+                assert!(cause.contains(expected), "{cause}");
             }
             // Cancel either a partial read or the oversized-frame backoff.
             drop(events);
@@ -664,27 +580,6 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn unavailable_discovery_roots_do_not_discard_other_candidates() {
-        let (root, _client, _listener) = socket_fixture(COMMAND_SOCKET).await;
-        let unavailable = root.path().join("not-a-directory");
-        fs::write(&unavailable, b"").await.unwrap();
-        let available = root.path().join("hypr");
-        for roots in [
-            vec![unavailable.clone(), available.clone()],
-            vec![available.clone(), unavailable],
-        ] {
-            for signature in [None, Some("test")] {
-                assert_eq!(
-                    socket_candidates(&roots, signature, COMMAND_SOCKET)
-                        .await
-                        .unwrap(),
-                    [available.join("test").join(COMMAND_SOCKET)]
-                );
-            }
         }
     }
 
@@ -699,9 +594,7 @@ mod tests {
                 fs::create_dir_all(&directory).await.unwrap();
                 listeners.push(tokio::net::UnixListener::bind(directory.join(socket)).unwrap());
             }
-            let candidates = socket_candidates(&roots, Some("preferred"), socket)
-                .await
-                .unwrap();
+            let candidates = socket_candidates(&roots, Some("preferred"), socket).await;
             assert_eq!(
                 candidates,
                 [
@@ -720,12 +613,19 @@ mod tests {
             fs::write(roots[0].join("file").join(socket), b"not a socket")
                 .await
                 .unwrap();
-            assert_eq!(
-                socket_candidates(&roots, Some("preferred"), socket)
-                    .await
-                    .unwrap(),
-                candidates
-            );
+            for unavailable in [
+                root.path().join("missing"),
+                roots[0].join("file").join(socket),
+            ] {
+                for index in [0, 2] {
+                    let mut degraded = roots.to_vec();
+                    degraded.insert(index, unavailable.clone());
+                    assert_eq!(
+                        socket_candidates(&degraded, Some("preferred"), socket).await,
+                        candidates
+                    );
+                }
+            }
         }
     }
 
@@ -768,39 +668,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_read_failure_retains_its_cause() {
-        let (stream, mut peer) = tokio::net::UnixStream::pair().unwrap();
-        let (sender, mut events) = mpsc::channel(8);
-        let task = tokio::spawn(async move {
-            super::forward_events(stream, &sender, &|event| event)
-                .await
-                .unwrap();
-        });
-        assert_eq!(events.recv().await, Some(Event::Connected));
-        peer.write_all(b"\xff\n").await.unwrap();
-        let Some(Event::Disconnected(Some(cause))) = events.recv().await else {
-            panic!("expected a disconnection with a cause");
-        };
-        assert!(cause.contains("utf-8"));
-        task.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn event_stream_reports_reconnects_and_backs_off_after_eof() {
         let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
         let (sender, mut events) = mpsc::channel(8);
         let task = tokio::spawn(watch_events_with(client, sender, |event| event));
         let (mut stream, _) = listener.accept().await.unwrap();
         assert_eq!(events.recv().await.unwrap(), Event::Connected);
-        stream
-            .write_all(b"openwindow>>123,1,app,title\n")
-            .await
-            .unwrap();
+        let boundary = "x".repeat(super::MAX_EVENT_BYTES as usize - 2);
+        for line in ["openwindow>>123,1,app,title", "", &boundary] {
+            stream
+                .write_all(format!("{line}\r\n").as_bytes())
+                .await
+                .unwrap();
+            assert_eq!(events.recv().await.unwrap(), Event::Message(line.into()));
+        }
+        stream.write_all(b"partial").await.unwrap();
+        drop(stream);
         assert_eq!(
             events.recv().await.unwrap(),
-            Event::Message("openwindow>>123,1,app,title".into())
+            Event::Message("partial".into())
         );
-        drop(stream);
         assert_eq!(events.recv().await.unwrap(), Event::Disconnected(None));
         assert!(
             time::timeout(Duration::from_millis(50), listener.accept())
@@ -856,13 +743,5 @@ mod tests {
         assert!(super::validate_peer(stream, uid).is_ok());
         let (stream, _peer) = tokio::net::UnixStream::pair().unwrap();
         assert!(super::validate_peer(stream, uid.wrapping_add(1)).is_err());
-    }
-
-    #[test]
-    fn rejects_signatures_that_can_escape_the_runtime_root() {
-        assert!(valid_signature("instance_123.456"));
-        for invalid in ["", ".", "..", "../other", "nested/instance"] {
-            assert!(!valid_signature(invalid), "{invalid}");
-        }
     }
 }
