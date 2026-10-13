@@ -62,6 +62,11 @@ function schemaError(schema, value, root, path) {
     return "";
 }
 
+function eventError(envelope) {
+    var schema = eventContracts[envelope.stream + ":" + envelope.event];
+    return schema ? schemaError(schema, envelope.data) : "";
+}
+
 function requestError(method, params) {
     var contract = contracts[method];
     return contract ? schemaError(contract.params_schema, params) : "";

@@ -62,6 +62,39 @@ impl<T: Serialize> Event<T> {
     }
 }
 
+/// Explicit event body for sources which can publish either state or an error.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EventBody {
+    pub data: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ApiError>,
+}
+impl EventBody {
+    #[must_use]
+    pub fn data(data: Value) -> Self {
+        Self { data, error: None }
+    }
+    #[must_use]
+    pub fn error(error: ApiError) -> Self {
+        Self {
+            data: serde_json::json!({}),
+            error: Some(error),
+        }
+    }
+    #[must_use]
+    pub fn envelope(
+        self,
+        api: ApiIdentity,
+        stream: &str,
+        event: &str,
+        correlation: Correlation<'_>,
+    ) -> Event<Value> {
+        let mut envelope = Event::new(api, stream, event, correlation, self.data);
+        envelope.error = self.error;
+        envelope
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Gap {

@@ -59,10 +59,32 @@ fn render(value: &Value) -> Result<String> {
             );
         }
     }
-    if !contracts.is_empty() {
+    let mut events = serde_json::Map::new();
+    for stream in registry["streams"]
+        .as_array()
+        .ok_or("streams must be an array")?
+    {
+        if let Some(entries) = stream["events"].as_array() {
+            for entry in entries {
+                if let Some(schema) = entry.get("data_schema") {
+                    check_schema(schema)?;
+                    events.insert(
+                        format!(
+                            "{}:{}",
+                            stream["name"].as_str().ok_or("stream name")?,
+                            entry["name"].as_str().ok_or("event name")?
+                        ),
+                        schema.clone(),
+                    );
+                }
+            }
+        }
+    }
+    if !contracts.is_empty() || !events.is_empty() {
         output.push_str(&format!(
-            "\nvar contracts = {};\n",
-            serde_json::to_string(&contracts)?
+            "\nvar contracts = {};\nvar eventContracts = {};\n",
+            serde_json::to_string(&contracts)?,
+            serde_json::to_string(&events)?
         ));
         output.push_str(include_str!("../schema_validation.js"));
     }

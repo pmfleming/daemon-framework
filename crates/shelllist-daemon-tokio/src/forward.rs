@@ -62,6 +62,25 @@ pub async fn emit_json_event(
         .await
 }
 
+/// Canonical emission takes an explicit body, never arbitrary envelope fields.
+pub async fn emit_event_body(
+    emitter: &SignalEmitter<'_>,
+    interface: &str,
+    api: ApiIdentity,
+    stream: &str,
+    event: &str,
+    correlation: Correlation<'_>,
+    body: shelllist_daemon_core::wire::EventBody,
+) -> zbus::Result<()> {
+    let value = body
+        .envelope(api, stream, event, correlation)
+        .into_value()
+        .expect("event body is JSON");
+    emitter
+        .emit(interface, "Event", &(stream, value.to_string()))
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BroadcastEvent, WatchPhase, forward_broadcast, forward_watch};
