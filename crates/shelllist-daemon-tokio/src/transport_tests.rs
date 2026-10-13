@@ -8,12 +8,12 @@ use std::{
     time::Duration,
 };
 
-struct Bus {
+pub(crate) struct Bus {
     child: Child,
     address: String,
 }
 impl Bus {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let mut child = Command::new("dbus-daemon")
             // The mandatory Nix compatibility gate has no host /etc/session.conf.
             // Use a private test policy with no host service-activation paths.
@@ -36,7 +36,7 @@ impl Bus {
             address: address.trim().into(),
         }
     }
-    async fn connection(&self) -> zbus::Connection {
+    pub(crate) async fn connection(&self) -> zbus::Connection {
         zbus::connection::Builder::address(self.address.as_str())
             .unwrap()
             .build()

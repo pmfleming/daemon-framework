@@ -20,7 +20,11 @@ impl JsonDbusClient {
     }
 
     pub async fn session(endpoint: DaemonEndpoint) -> Result<Self> {
-        let connection = zbus::Connection::session()
+        // The bridge owns the 30s request deadline. zbus' default (25s)
+        // must not preempt it and erase timeout/outcome-unknown semantics.
+        let connection = zbus::connection::Builder::session()?
+            .method_timeout(std::time::Duration::from_secs(60))
+            .build()
             .await
             .context("connect to session D-Bus")?;
         Ok(Self::new(connection, endpoint))

@@ -71,6 +71,8 @@ pub struct JsonlClientConfig<P> {
     pub endpoint: DaemonEndpoint,
     pub correlation: P,
     pub cancel_mode: CancelMode,
+    /// Retained for source compatibility. Call failures now have shared,
+    /// request-scoped outcomes; this mapper cannot erase execution uncertainty.
     pub call_failure: CallFailureMapper,
     pub pending_event_limit: usize,
     pub max_in_flight_requests: usize,
@@ -255,12 +257,12 @@ async fn spawn_request(
                 | ClientRequest::Shutdown { id } => id,
             };
             let _ = output
-                .send(response_command(
+                .send(OutputCommand::RequestError {
                     id,
-                    Err("bridge request capacity exceeded; request was not sent".into()),
-                    None,
-                    message.route,
-                ))
+                    outcome: "rejected-before-dispatch",
+                    message: "bridge request capacity exceeded; request was not sent".into(),
+                    route: message.route,
+                })
                 .await;
             return;
         }
@@ -284,20 +286,42 @@ async fn execute_request(
     let ClientMessage { request, route } = message;
     match request {
         ClientRequest::Call { id, method, params } => {
-            let result = with_transport_timeout(output, REQUEST_TIMEOUT, async {
-                dbus.get().await?.call(&method, params).await
-            })
+            let client = match tokio::time::timeout(CONTROL_TIMEOUT, dbus.get()).await {
+                Ok(Ok(client)) => client,
+                _ => {
+                    return OutputCommand::RequestError {
+                        id,
+                        route,
+                        outcome: "rejected-before-dispatch",
+                        message: "daemon connection unavailable; request was not sent".into(),
+                    };
+                }
+            };
+            ordinary_call(
+                id,
+                route,
+                REQUEST_TIMEOUT,
+                &method,
+                call_failure,
+                client.call(&method, params),
+            )
             .await
-            .map_err(|error| call_failure(&method, &error))
-            .or_else(|failure| match failure {
-                CallFailure::Api(response) => Ok(response),
-                CallFailure::Transport(error) => Err(error),
-            });
-            response_command(id, result, None, route)
         }
         ClientRequest::Subscribe { id, streams } => {
+            // Readiness has not admitted a server subscription or effect.
+            if !matches!(
+                tokio::time::timeout(CONTROL_TIMEOUT, dbus.wait_for_event_forwarding()).await,
+                Ok(Ok(()))
+            ) {
+                return OutputCommand::RequestError {
+                    id,
+                    route,
+                    outcome: "rejected-before-dispatch",
+                    message: "daemon event forwarding is not ready; subscription was not sent"
+                        .into(),
+                };
+            }
             let result = with_transport_timeout(output, REQUEST_TIMEOUT, async {
-                dbus.wait_for_event_forwarding().await?;
                 dbus.get().await?.subscribe(streams).await
             })
             .await
@@ -349,6 +373,40 @@ async fn release_consumer(
         Ok(json!({ "released": released }))
     })
     .await
+}
+
+// Ordinary expiry never requests generation recovery and bypasses domain mappers
+// that would otherwise erase uncertainty as `daemon-unavailable`. Never replay.
+async fn ordinary_call(
+    id: String,
+    route: Option<ClientRoute>,
+    timeout: Duration,
+    _method: &str,
+    _mapper: CallFailureMapper,
+    future: impl Future<Output = Result<Value>>,
+) -> OutputCommand {
+    match tokio::time::timeout(timeout, future).await {
+        Err(_) => OutputCommand::RequestError {
+            id,
+            route,
+            outcome: "outcome-unknown",
+            message: format!(
+                "daemon request timed out after {}ms; outcome unknown; reconcile state, do not retry automatically",
+                timeout.as_millis()
+            ),
+        },
+        Ok(Ok(response)) => response_command(id, Ok(response), None, route),
+        // A D-Bus/decoding error after entering Call does not prove that the
+        // effect was rejected. Domain failures arrive as valid API envelopes.
+        Ok(Err(error)) => OutputCommand::RequestError {
+            id,
+            route,
+            outcome: "outcome-unknown",
+            message: format!(
+                "daemon call reply unavailable; outcome unknown; do not retry automatically: {error:#}"
+            ),
+        },
+    }
 }
 
 async fn with_transport_timeout<T>(
@@ -521,6 +579,10 @@ async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle, mode: C
 }
 
 #[cfg(test)]
+#[path = "jsonl_deadline_tests.rs"]
+mod deadline_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{future::pending, time::Duration};
 
@@ -637,20 +699,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_reports_recovery_before_the_correlated_response() -> Result<()> {
+    async fn subscription_control_expiry_requires_generation_recovery() -> Result<()> {
         let (writer, reader) = duplex(4096);
         let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 8, writer);
         let mut lines = BufReader::new(reader).lines();
 
-        // The domain mapper may turn the error into a regular API response. The
-        // frontend must still receive an independent transport recovery signal.
+        // Unlike an ordinary Call, expiry of admitted subscription/control
+        // work must still request independent transport recovery.
         let error =
             with_transport_timeout(&output, Duration::from_millis(1), pending::<Result<()>>())
                 .await
                 .expect_err("request must time out");
         output
             .send(response_command(
-                "slow-call".into(),
+                "slow-control".into(),
                 Ok(json!({ "ok": false, "error": { "code": "daemon-unavailable" } })),
                 None,
                 None,
@@ -663,7 +725,7 @@ mod tests {
         assert_eq!(recovery["kind"], "transport-error");
         assert_eq!(recovery["error"], error.to_string());
         let response: Value = serde_json::from_str(&lines.next_line().await?.unwrap())?;
-        assert_eq!(response["id"], "slow-call");
+        assert_eq!(response["id"], "slow-control");
         assert_eq!(response["kind"], "response");
         assert!(lines.next_line().await?.is_none());
         Ok(())

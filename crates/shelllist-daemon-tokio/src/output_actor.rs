@@ -65,6 +65,12 @@ pub struct BasicCorrelation;
 impl CorrelationPolicy for BasicCorrelation {}
 
 pub(crate) enum OutputCommand {
+    RequestError {
+        id: String,
+        outcome: &'static str,
+        message: String,
+        route: Option<ClientRoute>,
+    },
     Response {
         id: String,
         result: std::result::Result<Value, String>,
@@ -310,6 +316,16 @@ where
     W: AsyncWrite + Unpin,
 {
     let message = match command {
+        OutputCommand::RequestError {
+            id,
+            outcome,
+            message,
+            route,
+        } => {
+            let mut message = response_error_message(&id, message);
+            message["outcome"] = Value::from(outcome);
+            Some(addressed_message(message, route.as_ref()))
+        }
         OutputCommand::Response {
             id,
             result,

@@ -132,7 +132,7 @@ pub fn protocol_error_message(error: impl Into<String>) -> Value {
 
 #[must_use]
 pub fn transport_error_message(error: impl Into<String>) -> Value {
-    json!({ "kind": "transport-error", "error": error.into() })
+    json!({ "kind": "transport-error", "outcome": "transport-generation-failure", "error": error.into() })
 }
 
 #[must_use]
