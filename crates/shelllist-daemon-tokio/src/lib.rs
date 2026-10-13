@@ -17,7 +17,9 @@ mod output_actor;
 mod owner;
 pub use owner::{OwnerLossError, OwnerLossMonitor, OwnerLossReceiver};
 mod resume;
+mod service;
 mod shutdown;
+pub use service::{Admitted, ServiceBoundary};
 mod task;
 
 pub use resume::{ResumeDetector, monitor_resumes, suspend_offset};
