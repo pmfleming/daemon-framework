@@ -10,9 +10,7 @@ mod file;
 mod forward;
 mod jsonl;
 pub use file::{read_bytes_bounded_async, write_bytes_atomic_async};
-pub use forward::{
-    BroadcastEvent, WatchPhase, emit_event_body, emit_json_event, forward_broadcast, forward_watch,
-};
+pub use forward::{BroadcastEvent, WatchPhase, emit_event_body, forward_broadcast, forward_watch};
 mod output_actor;
 mod owner;
 pub use owner::{OwnerLossError, OwnerLossMonitor, OwnerLossReceiver};
@@ -27,10 +25,7 @@ pub use task::{AbortOnDrop, TaskGroup, catch_task, spawn_named};
 mod subscription;
 
 pub use dbus::{JsonDbusClient, directed_emitter};
-pub use jsonl::{
-    CallFailure, CallFailureMapper, CancelMode, JsonlClientConfig, run_jsonl_client,
-    run_jsonl_client_with_input_limit,
-};
+pub use jsonl::{JsonlClientConfig, run_jsonl_client, run_jsonl_client_with_input_limit};
 pub use output_actor::{BasicCorrelation, CorrelationPolicy, TrackedId, TrackedKind};
 pub use shutdown::wait_for_shutdown;
 pub use subscription::{OwnedTaskRegistry, TaskAdmissionError, TaskLimits};

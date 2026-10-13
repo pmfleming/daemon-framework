@@ -57,26 +57,9 @@ impl RequestSlots {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CancelMode {
-    Json,
-    Unit,
-}
-
-pub enum CallFailure {
-    Api(Value),
-    Transport(String),
-}
-
-pub type CallFailureMapper = fn(&str, &anyhow::Error) -> CallFailure;
-
 pub struct JsonlClientConfig<P> {
     pub endpoint: DaemonEndpoint,
     pub correlation: P,
-    pub cancel_mode: CancelMode,
-    /// Ignored; retained for source compatibility. Call failures have shared,
-    /// request-scoped outcomes that cannot erase execution uncertainty.
-    pub call_failure: CallFailureMapper,
     pub pending_event_limit: usize,
     pub max_in_flight_requests: usize,
     /// `None` drains every accepted request; a duration bounds graceful drain.
@@ -156,13 +139,12 @@ pub async fn run_jsonl_client_with_input_limit<P: CorrelationPolicy>(
         &dbus,
         &output,
         &mut calls,
-        config.cancel_mode,
         &request_slots,
         maximum_request_bytes,
     )
     .await?;
     drain_calls(&mut calls, config.shutdown_timeout).await;
-    cancel_active(&dbus, &output, config.cancel_mode).await;
+    cancel_active(&dbus, &output).await;
 
     drop((event_task, owner_task));
     if let Some(id) = shutdown_id {
@@ -179,7 +161,6 @@ async fn request_loop(
     dbus: &ReconnectingClient,
     output: &OutputHandle,
     calls: &mut JoinSet<()>,
-    cancel_mode: CancelMode,
     request_slots: &RequestSlots,
     maximum_request_bytes: usize,
 ) -> Result<Option<String>> {
@@ -203,7 +184,7 @@ async fn request_loop(
         if let ClientRequest::Shutdown { id } = request.request {
             return Ok(Some(id));
         }
-        spawn_request(calls, dbus, output, request, cancel_mode, request_slots).await;
+        spawn_request(calls, dbus, output, request, request_slots).await;
         reap_finished(calls);
     }
     Ok(None)
@@ -230,7 +211,6 @@ async fn spawn_request(
     dbus: &ReconnectingClient,
     output: &OutputHandle,
     message: ClientMessage,
-    cancel_mode: CancelMode,
     request_slots: &RequestSlots,
 ) {
     // Acquire before spawning: a semaphore inside the task still permits an
@@ -260,7 +240,7 @@ async fn spawn_request(
     let output = output.clone();
     calls.spawn(async move {
         let _permit = permit;
-        let command = execute_request(dbus, &output, message, cancel_mode).await;
+        let command = execute_request(dbus, &output, message).await;
         let _ = output.send(command).await;
     });
 }
@@ -269,7 +249,6 @@ async fn execute_request(
     dbus: ReconnectingClient,
     output: &OutputHandle,
     message: ClientMessage,
-    cancel_mode: CancelMode,
 ) -> OutputCommand {
     let ClientMessage { request, route } = message;
     match request {
@@ -307,7 +286,7 @@ async fn execute_request(
         ClientRequest::Cancel { id, request_id } => {
             let result = with_transport_timeout(output, CONTROL_TIMEOUT, async {
                 let client = dbus.get().await?;
-                cancel(&client, &request_id, cancel_mode).await
+                client.cancel_json(&request_id).await
             })
             .await;
             let cancelled = result
@@ -318,7 +297,7 @@ async fn execute_request(
             response_command(id, result, cancelled, route)
         }
         ClientRequest::Release { id } => {
-            let result = release_consumer(&dbus, output, route.as_ref(), cancel_mode).await;
+            let result = release_consumer(&dbus, output, route.as_ref()).await;
             response_command(id, result, None, route)
         }
         ClientRequest::Shutdown { id } => OutputCommand::Shutdown(id),
@@ -329,14 +308,13 @@ async fn release_consumer(
     dbus: &ReconnectingClient,
     output: &OutputHandle,
     route: Option<&ClientRoute>,
-    mode: CancelMode,
 ) -> Result<Value> {
     let route = route.context("release requires a consumer route")?;
     let ids = output.owned_ids(route).await;
     with_transport_timeout(output, CONTROL_TIMEOUT, async {
         let released = ids.len();
         for id in ids {
-            let response = cancel(&dbus.get().await?, &id, mode).await?;
+            let response = dbus.get().await?.cancel_json(&id).await?;
             anyhow::ensure!(
                 cancellation_succeeded(&response),
                 "daemon rejected cancellation of {id}"
@@ -413,13 +391,6 @@ fn response_command(
 
 fn cancellation_succeeded(response: &Value) -> bool {
     response.get("ok").and_then(Value::as_bool) != Some(false)
-}
-
-async fn cancel(dbus: &JsonDbusClient, request_id: &str, mode: CancelMode) -> Result<Value> {
-    match mode {
-        CancelMode::Json => dbus.cancel_json(request_id).await,
-        CancelMode::Unit => dbus.cancel_unit(request_id).await,
-    }
 }
 
 fn spawn_event_forwarder(dbus: ReconnectingClient, output: OutputHandle) -> JoinHandle<()> {
@@ -535,12 +506,12 @@ async fn drain_all(calls: &mut JoinSet<()>) {
     }
 }
 
-async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle, mode: CancelMode) {
+async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle) {
     let Ok(client) = dbus.get().await else {
         return;
     };
     for id in output.active_ids().await {
-        let _ = cancel(&client, &id, mode).await;
+        let _ = client.cancel_json(&id).await;
     }
 }
 
@@ -554,7 +525,7 @@ mod tests {
     use anyhow::Result;
     use serde_json::json;
 
-    use super::{CancelMode, ReconnectingClient, RequestSlots, spawn_request};
+    use super::{ReconnectingClient, RequestSlots, spawn_request};
     use shelllist_daemon_core::{ClientMessage, ClientRequest, DaemonEndpoint};
 
     #[tokio::test]
@@ -572,8 +543,6 @@ mod tests {
                     "org.example.Unused",
                 ),
                 correlation: crate::output_actor::BasicCorrelation,
-                cancel_mode: super::CancelMode::Json,
-                call_failure: |_, _| panic!("invalid configuration must not dispatch"),
                 pending_event_limit: 1,
                 max_in_flight_requests: 1,
                 shutdown_timeout: None,
@@ -606,15 +575,7 @@ mod tests {
             "/test",
             "org.test.Daemon",
         ));
-        spawn_request(
-            &mut calls,
-            &dbus,
-            &output.handle,
-            message,
-            CancelMode::Json,
-            &slots,
-        )
-        .await;
+        spawn_request(&mut calls, &dbus, &output.handle, message, &slots).await;
         assert!(calls.is_empty());
         let response = output.next().await?;
         assert_eq!(response["ok"], false);

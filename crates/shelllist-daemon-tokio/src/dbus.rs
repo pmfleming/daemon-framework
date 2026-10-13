@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::Value;
 use zbus::{message::Header, object_server::SignalEmitter};
 
 use shelllist_daemon_core::DaemonEndpoint;
@@ -71,15 +71,6 @@ impl JsonDbusClient {
             .await
             .with_context(|| format!("cancel {} request", self.endpoint.executable))?;
         serde_json::from_str(&response).context("decode daemon cancellation response")
-    }
-
-    pub async fn cancel_unit(&self, request_id: &str) -> Result<Value> {
-        let proxy = self.proxy().await?;
-        proxy
-            .call::<_, _, ()>("Cancel", &(request_id,))
-            .await
-            .with_context(|| format!("cancel {} request", self.endpoint.executable))?;
-        Ok(json!({ "cancelled": request_id }))
     }
 
     pub(crate) async fn events(&self) -> Result<zbus::proxy::SignalStream<'static>> {

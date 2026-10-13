@@ -1,5 +1,4 @@
 //! Forwarding mechanics; payloads and lag recovery remain daemon policy.
-use serde_json::Value;
 use shelllist_daemon_core::{ApiIdentity, Correlation};
 use std::future::Future;
 use tokio::sync::{broadcast, watch};
@@ -43,23 +42,6 @@ pub async fn forward_broadcast<T: Clone, F: Future<Output = ()>>(
         };
         emit(event).await;
     }
-}
-
-/// Emits through the provided emitter, preserving its destination. Interface
-/// declarations and any decision to broadcast or terminate on failure stay local.
-pub async fn emit_json_event(
-    emitter: &SignalEmitter<'_>,
-    interface: &str,
-    api: ApiIdentity,
-    stream: &str,
-    event: &str,
-    correlation: Correlation<'_>,
-    fields: Value,
-) -> zbus::Result<()> {
-    let value = shelllist_daemon_core::event_envelope(api, stream, event, correlation, fields);
-    emitter
-        .emit(interface, "Event", &(stream, value.to_string()))
-        .await
 }
 
 /// Canonical emission takes an explicit body, never arbitrary envelope fields.

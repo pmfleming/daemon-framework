@@ -118,14 +118,14 @@ async fn shared_emission_preserves_wire_shape_and_directed_delivery() {
     let emitter = zbus::object_server::SignalEmitter::new(&server, "/test")
         .unwrap()
         .set_destination(caller.unique_name().unwrap().clone().into());
-    crate::emit_json_event(
+    crate::emit_event_body(
         &emitter,
         "org.shelllist.Test",
-        ApiIdentity::new("test-api", 1),
+        ApiIdentity::new("test-api", 2),
         "test.changed",
         "changed",
         Correlation::Subscription("sub-1"),
-        json!({ "data": { "revision": 7 } }),
+        shelllist_daemon_core::wire::EventBody::data(json!({ "revision": 7 })),
     )
     .await
     .unwrap();
@@ -139,7 +139,7 @@ async fn shared_emission_preserves_wire_shape_and_directed_delivery() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(event).unwrap(),
         json!({
-            "protocol": "test-api", "version": 1, "stream": "test.changed", "event": "changed", "subscription_id": "sub-1", "data": { "revision": 7 }
+            "protocol": "test-api", "version": 2, "stream": "test.changed", "event": "changed", "subscription_id": "sub-1", "data": { "revision": 7 }
         })
     );
     assert!(

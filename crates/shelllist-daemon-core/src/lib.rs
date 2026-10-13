@@ -21,7 +21,7 @@ pub use file::{
 };
 
 pub use endpoint::{DaemonEndpoint, IdSequence};
-pub use envelope::{ApiError, ApiIdentity, Correlation, error, event_envelope, success};
+pub use envelope::{ApiError, ApiIdentity, Correlation, error, success};
 pub use jsonl_wire::{
     ClientMessage, ClientRequest, ClientRoute, DEFAULT_JSONL_REQUEST_BYTES,
     MAX_JSONL_REQUEST_BYTES, RouteKind, addressed_message, event_message, protocol_error_message,

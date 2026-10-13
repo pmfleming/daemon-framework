@@ -1,6 +1,4 @@
-use super::{
-    CancelMode, ReconnectingClient, execute_request, ordinary_call, with_transport_timeout,
-};
+use super::{ReconnectingClient, execute_request, ordinary_call, with_transport_timeout};
 use crate::{
     dbus::JsonDbusClient, output_actor::test_support::Output, subscription::OwnedTaskRegistry,
     transport_tests::Bus,
@@ -179,7 +177,6 @@ async fn readiness_expiry_is_rejected_before_dispatch_not_generation_failure() -
             },
             route: None,
         },
-        CancelMode::Json,
     )
     .await;
     output.handle.send(command).await?;
