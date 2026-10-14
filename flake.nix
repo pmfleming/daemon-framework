@@ -204,6 +204,7 @@
                 dbus
                 git
                 nixpkgs-fmt
+                python3
                 rust-analyzer
               ]);
           };
