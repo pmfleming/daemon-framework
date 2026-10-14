@@ -38,6 +38,10 @@ pub struct MethodPolicy {
     pub ack_budget_ms: u32,
     pub request_bytes: usize,
     pub result_bytes: usize,
+    /// Concurrent handlers of this method, including effects with abandoned waits.
+    pub max_in_flight: usize,
+    /// Concurrent policy-governed handlers across methods for one bus owner.
+    pub max_owner_in_flight: usize,
 }
 
 impl MethodPolicy {
@@ -54,6 +58,8 @@ impl MethodPolicy {
             ack_budget_ms: 30_000,
             request_bytes: 1024 * 1024,
             result_bytes: 16 * 1024 * 1024,
+            max_in_flight: 16,
+            max_owner_in_flight: 8,
         }
     }
 }
