@@ -8,8 +8,8 @@ let
     cargo = pkgs.cargo.version;
     clippy = pkgs.clippy.version;
     rustfmt = pkgs.rustfmt.version;
-    platformRustc = pkgs.rustPlatform.rust.rustc.version;
-    platformCargo = pkgs.rustPlatform.rust.cargo.version;
+    platformRustc = pkgs.rustc.version;
+    platformCargo = pkgs.cargo.version;
   };
 in
 assert pkgs.lib.assertMsg (
