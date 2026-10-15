@@ -20,3 +20,17 @@ Existing replacement, ownership and capacity tests remain.
 
 Validation: formatting, strict workspace/all-target Clippy, `git diff --check`,
 and all 89 workspace tests pass. No runtime benchmark claim is made.
+
+## 2. Skip ancestor-sync preparation when disabled
+
+`create_directory` now short-circuits ancestor discovery before filesystem
+existence checks when `sync_new_ancestors` is false. The collected list itself
+controls the sync loop, removing a redundant nested policy branch. Directory
+creation, private modes, symlink rejection and root-to-leaf sync order remain.
+
+A regression writes and replaces nested state with ancestor syncing both disabled
+and enabled, independently of parent syncing. It checks contents, restoration of
+private directory/file modes and temporary-file cleanup.
+
+Validation: formatting, strict workspace/all-target Clippy, `git diff --check`,
+and all 90 workspace tests pass.

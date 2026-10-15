@@ -139,7 +139,9 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 fn create_directory(path: &Path, policy: AtomicFilePolicy) -> io::Result<()> {
     let missing = path
         .ancestors()
-        .take_while(|path| !path.as_os_str().is_empty() && !path.exists())
+        .take_while(|path| {
+            policy.sync_new_ancestors && !path.as_os_str().is_empty() && !path.exists()
+        })
         .collect::<Vec<_>>();
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -151,11 +153,9 @@ fn create_directory(path: &Path, policy: AtomicFilePolicy) -> io::Result<()> {
     if let Some(mode) = policy.directory_mode {
         fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
     }
-    if policy.sync_new_ancestors {
-        for directory in missing.into_iter().rev() {
-            sync_directory(directory)?;
-            sync_parent(directory)?;
-        }
+    for directory in missing.into_iter().rev() {
+        sync_directory(directory)?;
+        sync_parent(directory)?;
     }
     Ok(())
 }
@@ -263,6 +263,36 @@ pub(crate) mod tests {
             parent_directory(Path::new("relative.json")).unwrap(),
             Path::new(".")
         );
+    }
+
+    #[test]
+    fn ancestor_sync_policy_preserves_nested_creation_and_private_modes() {
+        let root = Directory::new();
+        for sync_new_ancestors in [false, true] {
+            let path = root
+                .0
+                .join(sync_new_ancestors.to_string())
+                .join("nested/data");
+            let policy = AtomicFilePolicy {
+                sync_parent: false,
+                sync_new_ancestors,
+                ..AtomicFilePolicy::PRIVATE
+            };
+            write_bytes_atomic(&path, b"old", policy).unwrap();
+            let parent = path.parent().unwrap();
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+            write_bytes_atomic(&path, b"new", policy).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"new");
+            assert_eq!(
+                fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(fs::read_dir(parent).unwrap().count(), 1);
+        }
     }
 
     #[test]
