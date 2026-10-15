@@ -80,6 +80,7 @@ fn smart_gaps_and_group_visibility_filters() {
     for selector in [
         "m[eDP-1] w[t1]",
         "w[tg1]",
+        "w[g1]",
         "w[f1]",
         "r[1-4] m[current] w[2] f[-1]",
         "  r[1-4]m[current]\t w[2] f[-1]  ",
@@ -90,6 +91,9 @@ fn smart_gaps_and_group_visibility_filters() {
     assert_rule(&mut parts, "w[t1]", "eDP-1", 53.0);
     parts[3][1]["grouped"] = json!(["b", "a"]);
     assert_rule(&mut parts, "w[tg1]", "eDP-1", 51.0);
+    // Order is irrelevant, but member multiplicity still distinguishes keys.
+    parts[3][1]["grouped"] = json!(["a", "b", "a"]);
+    assert_rule(&mut parts, "w[tg2]", "eDP-1", 51.0);
     parts[3][1]["floating"] = json!(true);
     parts[3][1]["pinned"] = json!(true);
     parts[3][1]["visible"] = json!(false);

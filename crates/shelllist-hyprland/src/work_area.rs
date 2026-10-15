@@ -111,7 +111,7 @@ fn parse(text: &str) -> Result<Snapshot> {
     let monitors: Vec<Monitor> = Deserialize::deserialize(&mut docs)?;
     let workspaces = Deserialize::deserialize(&mut docs)?;
     let rules = Deserialize::deserialize(&mut docs)?;
-    let clients = Deserialize::deserialize(&mut docs)?;
+    let mut clients: Vec<Window> = Deserialize::deserialize(&mut docs)?;
     let options = Value::deserialize(&mut docs)?;
     docs.end()?;
     let gaps =
@@ -122,6 +122,10 @@ fn parse(text: &str) -> Result<Snapshot> {
             && [m.x, m.y, m.width, m.height].iter().all(|v| v.is_finite())),
         "Invalid Hyprland monitor geometry"
     );
+    // Canonicalize once; selectors borrow group keys without scratch vectors.
+    for client in &mut clients {
+        client.grouped.sort_unstable();
+    }
     Ok(Snapshot {
         monitors,
         workspaces,
@@ -217,21 +221,12 @@ fn window_count(flags: &str, workspace: &Workspace, clients: &[Window]) -> usize
     if flags.is_empty() {
         return workspace.windows;
     }
+    let group_once = flags.contains('g');
     let mut groups = HashSet::new();
     clients
         .iter()
         .filter(|c| c.on(workspace) && c.mapped && c.matches_flags(flags))
-        .filter(|c| {
-            if !flags.contains('g') {
-                return true;
-            }
-            if c.grouped.is_empty() {
-                return false;
-            }
-            let mut group: Vec<_> = c.grouped.iter().collect();
-            group.sort();
-            groups.insert(group)
-        })
+        .filter(|c| !group_once || (!c.grouped.is_empty() && groups.insert(c.grouped.as_slice())))
         .count()
 }
 fn range(value: &str) -> Option<std::ops::RangeInclusive<i64>> {

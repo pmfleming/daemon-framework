@@ -34,3 +34,18 @@ private directory/file modes and temporary-file cleanup.
 
 Validation: formatting, strict workspace/all-target Clippy, `git diff --check`,
 and all 90 workspace tests pass.
+
+## 3. Canonicalize window-group identities once
+
+Sort each client's group-membership list once after decoding the snapshot.
+Group-count selectors now hash borrowed slices, removing a temporary vector and
+sort per candidate per evaluation. The group-filter predicate also avoids nested
+returns. Member order is ignored, but duplicate members are deliberately retained
+to preserve the previous key semantics; empty groups are still excluded.
+
+The existing group/visibility regression now checks empty-group exclusion and
+distinct multiplicities as well as shuffled-equivalent groups. No public types
+or wire formats change.
+
+Validation: formatting, strict workspace/all-target Clippy, `git diff --check`,
+and all 90 workspace tests pass (additional cases in the existing test).
