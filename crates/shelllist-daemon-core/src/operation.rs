@@ -154,8 +154,11 @@ impl<T> RecentResults<T> {
     }
     pub fn prune(&mut self, now: Instant) {
         if let Some(retention) = self.retention {
-            self.entries
-                .retain(|entry| now.saturating_duration_since(entry.recorded) < retention);
+            // Recording (including replacement) appends in timestamp order.
+            let expired = self.entries.partition_point(|entry| {
+                now.saturating_duration_since(entry.recorded) >= retention
+            });
+            self.entries.drain(..expired);
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -202,6 +205,33 @@ mod tests {
         assert_eq!(active.iter().count(), 0);
         assert!(active.admit(Some("b")).is_ok());
     }
+    #[test]
+    fn pruning_preserves_the_live_suffix_and_exact_expiry_boundary() {
+        let ttl = Duration::from_secs(2);
+        let now = Instant::now();
+        let mut recent = RecentResults::new(4, None);
+        for id in 0..4 {
+            recent.record(id.to_string(), None, id);
+            recent.entries.back_mut().unwrap().recorded = now - Duration::from_secs(3 - id);
+        }
+        recent.prune(now + ttl);
+        assert_eq!(recent.entries.len(), 4); // No TTL means no expiry.
+        recent.retention = Some(ttl);
+        recent.prune(now - Duration::from_secs(4)); // Earlier samples cannot expire entries.
+        assert_eq!(recent.entries.len(), 4);
+        recent.prune(now);
+        assert_eq!(
+            recent
+                .entries
+                .iter()
+                .map(|entry| entry.value)
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+        recent.prune(now + ttl);
+        assert!(recent.is_empty());
+    }
+
     #[test]
     fn terminal_results_are_bounded_replaced_and_expire() {
         let ttl = Duration::from_secs(5);
