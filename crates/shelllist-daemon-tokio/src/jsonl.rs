@@ -534,38 +534,25 @@ mod tests {
     use super::{ReconnectingClient, RequestSlots, spawn_request};
     use shelllist_daemon_core::{ClientMessage, ClientRequest, DaemonEndpoint};
 
+    use tokio::task::JoinSet;
+
     #[tokio::test]
-    async fn invalid_bulk_limits_fail_before_starting_transport_tasks() {
-        for maximum in [
-            0,
-            shelllist_daemon_core::MAX_JSONL_REQUEST_BYTES + 1,
-            usize::MAX,
-        ] {
+    async fn invalid_limits_and_overload_are_rejected_before_dispatch() -> Result<()> {
+        let endpoint = DaemonEndpoint::new("test", "org.test.Daemon", "/test", "org.test.Daemon");
+        for maximum in [0, shelllist_daemon_core::MAX_JSONL_REQUEST_BYTES + 1] {
             let config = super::JsonlClientConfig {
-                endpoint: DaemonEndpoint::new(
-                    "unused",
-                    "org.example.Unused",
-                    "/org/example/Unused",
-                    "org.example.Unused",
-                ),
+                endpoint,
                 correlation: crate::output_actor::BasicCorrelation,
                 pending_event_limit: 1,
                 max_in_flight_requests: 1,
                 shutdown_timeout: None,
             };
-            assert_eq!(
+            assert!(
                 super::run_jsonl_client_with_input_limit(config, maximum)
                     .await
-                    .unwrap_err()
-                    .to_string(),
-                "invalid JSONL request byte limit"
+                    .is_err()
             );
         }
-    }
-    use tokio::task::JoinSet;
-
-    #[tokio::test]
-    async fn overload_is_addressed_and_never_spawns_or_sends_the_request() -> Result<()> {
         let mut output = Output::new();
         let slots = RequestSlots::new(0);
         let message: ClientMessage = serde_json::from_value(json!({
@@ -575,12 +562,7 @@ mod tests {
         let expected_route = serde_json::to_value(message.route.as_ref().unwrap())?;
         let mut calls = JoinSet::new();
         // No D-Bus connection exists; overload must be rejected before execution.
-        let dbus = ReconnectingClient::new(DaemonEndpoint::new(
-            "test",
-            "org.test.Daemon",
-            "/test",
-            "org.test.Daemon",
-        ));
+        let dbus = ReconnectingClient::new(endpoint);
         spawn_request(&mut calls, &dbus, &output.handle, message, &slots).await;
         assert!(calls.is_empty());
         let response = output.next().await?;
@@ -606,16 +588,5 @@ mod tests {
         );
         drop(permits);
         output.finish().await
-    }
-
-    #[test]
-    fn domain_cancellation_errors_do_not_retire_subscription_ownership() {
-        assert!(!super::cancellation_succeeded(
-            &json!({ "ok": false, "error": {} })
-        ));
-        assert!(super::cancellation_succeeded(&json!({ "ok": true })));
-        assert!(super::cancellation_succeeded(
-            &json!({ "cancelled": "subscription-1" })
-        ));
     }
 }

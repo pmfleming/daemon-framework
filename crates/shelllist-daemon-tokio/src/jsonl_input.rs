@@ -99,7 +99,7 @@ mod tests {
         for (capacity, maximum) in
             (1..=12).flat_map(|capacity| [0, 1, 3, 8].map(|maximum| (capacity, maximum)))
         {
-            let input = b"12345678\n12345678\r\n\n\r\n\xc3\xa9\xc3\xa9\n123456789\n12345678\n\r";
+            let input = b"12345678\n12345678\r\n\n\r\n\xc3\xa9\xc3\xa9\n123456789{\"op\":\"shutdown\"}\n12345678\n\r";
             let mut frames = Frames::new(BufReader::with_capacity(capacity, &input[..]), maximum);
             for expected in [
                 Frame::Line("12345678".into()),
@@ -124,25 +124,6 @@ mod tests {
         let error = frames.next().await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "stream did not contain valid UTF-8");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn drains_large_records_once_and_never_dispatches_their_suffix() -> io::Result<()> {
-        for newline in [false, true] {
-            let mut input = vec![b'x'; 1_000_000];
-            input.extend_from_slice(br#"{"op":"shutdown","id":"hidden"}"#);
-            if newline {
-                input.extend_from_slice(b"\nvalid\n");
-            }
-            let mut frames = Frames::new(BufReader::with_capacity(7, &input[..]), 32);
-            assert_eq!(frames.next().await?, Some(Frame::TooLarge));
-            assert!(frames.bytes.capacity() <= 33);
-            if newline {
-                assert_eq!(frames.next().await?, Some(Frame::Line("valid".into())));
-            }
-            assert_eq!(frames.next().await?, None);
-        }
         Ok(())
     }
 

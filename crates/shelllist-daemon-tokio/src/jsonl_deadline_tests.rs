@@ -2,7 +2,9 @@ use super::{
     ReconnectingClient, cancel_active, execute_request, ordinary_call, with_transport_timeout,
 };
 use crate::{
-    dbus::JsonDbusClient, output_actor::test_support::Output, subscription::OwnedTaskRegistry,
+    dbus::JsonDbusClient,
+    output_actor::{OutputCommand, test_support::Output},
+    subscription::OwnedTaskRegistry,
     transport_tests::Bus,
 };
 use anyhow::Result;
@@ -10,17 +12,18 @@ use serde_json::json;
 use shelllist_daemon_core::{ClientMessage, ClientRequest, DaemonEndpoint};
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
+use tokio::sync::oneshot;
 use zbus::message::Header;
 
 struct Service {
     effects: Arc<AtomicUsize>,
     subscriptions: Arc<OwnedTaskRegistry>,
-    held: Arc<()>,
+    subscription_lifetime: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 #[zbus::interface(name = "org.shelllist.Deadlines")]
 impl Service {
@@ -31,6 +34,13 @@ impl Service {
         }
         json!({"ok": method != "failure"}).to_string()
     }
+    async fn cancel(&self, id: &str) -> String {
+        if id == "blocked" {
+            self.effects.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+        json!({"ok": id != "refused"}).to_string()
+    }
     async fn subscribe(
         &self,
         _streams: Vec<String>,
@@ -38,14 +48,14 @@ impl Service {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> String {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let held = self.held.clone();
+        let lifetime = self.subscription_lifetime.lock().unwrap().take();
         self.subscriptions
             .spawn_for_owner(
                 "late-sub".into(),
                 header.sender().map(ToString::to_string),
                 connection,
                 async move {
-                    let _held = held;
+                    let _lifetime = lifetime;
                     std::future::pending::<()>().await;
                 },
             )
@@ -59,8 +69,9 @@ const ENDPOINT: DaemonEndpoint = DaemonEndpoint::new(
     "/test",
     "org.shelllist.Deadlines",
 );
+
 #[tokio::test]
-async fn applied_slow_call_does_not_fail_healthy_call_or_replay() -> Result<()> {
+async fn call_and_cancel_deadlines_preserve_outcomes_ownership_and_no_replay() -> Result<()> {
     let bus = Bus::start();
     let server = bus.connection().await;
     let effects = Arc::new(AtomicUsize::new(0));
@@ -71,13 +82,12 @@ async fn applied_slow_call_does_not_fail_healthy_call_or_replay() -> Result<()> 
             Service {
                 effects: effects.clone(),
                 subscriptions: Arc::default(),
-                held: Arc::new(()),
+                subscription_lifetime: Arc::default(),
             },
         )
         .await?;
     server.request_name(ENDPOINT.bus_name).await?;
-    let connection = bus.connection().await;
-    let client = JsonDbusClient::new(connection, ENDPOINT);
+    let client = JsonDbusClient::new(bus.connection().await, ENDPOINT);
     let mut output = Output::new();
     let (slow, healthy) = tokio::join!(
         ordinary_call(
@@ -95,7 +105,6 @@ async fn applied_slow_call_does_not_fail_healthy_call_or_replay() -> Result<()> 
     );
     output.handle.send(slow).await?;
     output.handle.send(healthy).await?;
-    tokio::time::sleep(Duration::from_millis(150)).await;
     output
         .handle
         .send(
@@ -111,20 +120,63 @@ async fn applied_slow_call_does_not_fail_healthy_call_or_replay() -> Result<()> 
     let slow = output.next().await?;
     assert_eq!(slow["outcome"], "outcome-unknown");
     assert_eq!(slow["kind"], "response");
-    let healthy = output.next().await?;
-    assert_eq!(healthy["response"]["ok"], true);
+    assert_eq!(output.next().await?["response"]["ok"], true);
     let failure = output.next().await?;
-    assert_eq!(failure["ok"], true); // domain failure, not a transport failure
+    assert_eq!(failure["ok"], true); // Domain failure, not a transport failure.
     assert_eq!(failure["response"]["ok"], false);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
+
+    let dbus = ReconnectingClient::new(ENDPOINT);
+    *dbus.current.lock().await = Some(client);
+    for id in ["refused", "active", "blocked"] {
+        output
+            .handle
+            .send(OutputCommand::Response {
+                id: format!("subscribe-{id}"),
+                result: Ok(json!({"data":{"subscription":{"id":id}}})),
+                cancelled_request_id: None,
+                route: None,
+            })
+            .await?;
+        output.next().await?;
+    }
+    for (id, succeeded, retained) in [
+        ("refused", false, vec!["active", "blocked", "refused"]),
+        ("active", true, vec!["blocked", "refused"]),
+    ] {
+        let command = execute_request(
+            dbus.clone(),
+            &output.handle,
+            ClientMessage {
+                request: ClientRequest::Cancel {
+                    id: format!("cancel-{id}"),
+                    request_id: id.into(),
+                },
+                route: None,
+            },
+        )
+        .await;
+        output.handle.send(command).await?;
+        assert_eq!(output.next().await?["response"]["ok"], succeeded);
+        let mut active = output.handle.active_ids().await;
+        active.sort();
+        assert_eq!(active, retained);
+    }
+    // A real stalled Cancel reply must not hang shutdown or be replayed.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        cancel_active(&dbus, &output.handle, Duration::from_secs(1)),
+    )
+    .await?;
+    assert_eq!(effects.load(Ordering::SeqCst), 2);
     output.finish().await
 }
 
 #[tokio::test]
-async fn subscription_expiry_recovers_owner_even_when_server_creates_it_late() -> Result<()> {
+async fn subscription_readiness_and_late_expiry_preserve_owner_cleanup() -> Result<()> {
     let bus = Bus::start();
     let server = bus.connection().await;
-    let held = Arc::new(());
+    let (lifetime, released) = oneshot::channel();
     server
         .object_server()
         .at(
@@ -132,7 +184,7 @@ async fn subscription_expiry_recovers_owner_even_when_server_creates_it_late() -
             Service {
                 effects: Arc::default(),
                 subscriptions: Arc::default(),
-                held: held.clone(),
+                subscription_lifetime: Arc::new(Mutex::new(Some(lifetime))),
             },
         )
         .await?;
@@ -140,52 +192,8 @@ async fn subscription_expiry_recovers_owner_even_when_server_creates_it_late() -
     let connection = bus.connection().await;
     let client = JsonDbusClient::new(connection.clone(), ENDPOINT);
     let mut output = Output::new();
-    assert!(
-        with_transport_timeout(
-            &output.handle,
-            Duration::from_millis(30),
-            client.subscribe(vec!["state".into()])
-        )
-        .await
-        .is_err()
-    );
-    let error = output.next().await?;
-    assert_eq!(error["kind"], "transport-error");
-    // The real QML transport-error path terminates/restarts the whole bridge.
-    // Close the old owner here, not just the timed-out subscription future.
-    connection.close().await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        Arc::strong_count(&held),
-        2,
-        "only test and service retain marker; late task was cleaned up"
-    );
-    output.finish().await
-}
-
-#[tokio::test]
-async fn cleanup_deadline_includes_connection_acquisition() -> Result<()> {
     let dbus = ReconnectingClient::new(ENDPOINT);
-    let output = Output::new();
-    // Hold the same mutex a stalled connection attempt would hold. No bus is
-    // needed, and cleanup cannot acquire a connection until the guard drops.
-    let held = dbus.current.lock().await;
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        cancel_active(&dbus, &output.handle, Duration::from_millis(10)),
-    )
-    .await?;
-    assert!(held.is_none());
-    drop(held);
-    output.finish().await
-}
-
-#[tokio::test]
-async fn readiness_expiry_is_rejected_before_dispatch_not_generation_failure() -> Result<()> {
-    let bus = Bus::start();
-    let dbus = ReconnectingClient::new(ENDPOINT);
-    *dbus.current.lock().await = Some(JsonDbusClient::new(bus.connection().await, ENDPOINT));
-    let mut output = Output::new();
+    *dbus.current.lock().await = Some(client.clone());
     let command = execute_request(
         dbus,
         &output.handle,
@@ -199,7 +207,24 @@ async fn readiness_expiry_is_rejected_before_dispatch_not_generation_failure() -
     )
     .await;
     output.handle.send(command).await?;
-    let response = output.next().await?;
-    assert_eq!(response["outcome"], "rejected-before-dispatch");
+    assert_eq!(output.next().await?["outcome"], "rejected-before-dispatch");
+    assert!(
+        with_transport_timeout(
+            &output.handle,
+            Duration::from_millis(30),
+            client.subscribe(vec!["state".into()])
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(output.next().await?["kind"], "transport-error");
+    // The frontend closes the bridge owner on transport error. Even a server
+    // subscription created after that close must release its owned worker.
+    connection.close().await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), released)
+            .await?
+            .is_err()
+    );
     output.finish().await
 }

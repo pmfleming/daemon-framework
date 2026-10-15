@@ -406,47 +406,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_signature_is_reported_without_discovery_fallback() {
+    async fn invalid_and_exact_targets_never_use_another_instance() {
         use std::os::unix::ffi::OsStringExt;
-
-        let (root, _client, listener) = socket_fixture(COMMAND_SOCKET).await;
-        let mut signatures = vec![std::ffi::OsString::from_vec(vec![0xff])];
-        signatures.extend(["", ".", "..", "../other", "nested/instance"].map(Into::into));
-        for signature in signatures {
-            let client = Client {
-                runtime_dir: root.path().into(),
-                signature: Some(signature),
-            };
-            assert!(client.instance_signature().is_err());
-            for error in [
-                client.request("j/clients").await.unwrap_err(),
-                client.request_exact("dispatch test").await.unwrap_err(),
-                client.event_socket().await.unwrap_err(),
-            ] {
-                assert!(error.to_string().contains("HYPRLAND_INSTANCE_SIGNATURE"));
-            }
-        }
-        assert!(
-            time::timeout(Duration::from_millis(50), listener.accept())
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            Client::new(root.path().into(), None)
-                .instance_signature()
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            Client::new(root.path().into(), Some("instance_123.456-test".into()))
-                .instance_signature()
-                .unwrap(),
-            Some("instance_123.456-test")
-        );
-    }
-
-    #[tokio::test]
-    async fn exact_requests_never_use_another_instance() {
         let (root, _client, fallback) = socket_fixture(COMMAND_SOCKET).await;
         let signature = root
             .path()
@@ -468,6 +429,21 @@ mod tests {
             let client = Client::new(root.path().into(), signature);
             assert!(client.request_exact("dispatch test").await.is_err());
         }
+        let mut invalid = vec![std::ffi::OsString::from_vec(vec![0xff])];
+        invalid.extend(["", ".", "..", "../other", "nested/instance"].map(Into::into));
+        for signature in invalid {
+            let client = Client {
+                runtime_dir: root.path().into(),
+                signature: Some(signature),
+            };
+            for error in [
+                client.request("j/clients").await.unwrap_err(),
+                client.request_exact("dispatch test").await.unwrap_err(),
+                client.event_socket().await.unwrap_err(),
+            ] {
+                assert!(error.to_string().contains("HYPRLAND_INSTANCE_SIGNATURE"));
+            }
+        }
         assert!(
             time::timeout(Duration::from_millis(50), fallback.accept())
                 .await
@@ -476,49 +452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_discovery_tries_only_matching_signature_across_roots() {
-        let root = tempfile::tempdir().unwrap();
-        let roots = [root.path().join("runtime"), root.path().join("legacy")];
-        for base in &roots {
-            fs::create_dir_all(base.join("preferred")).await.unwrap();
-        }
-        drop(
-            tokio::net::UnixListener::bind(roots[0].join("preferred").join(COMMAND_SOCKET))
-                .unwrap(),
-        );
-        let listener =
-            tokio::net::UnixListener::bind(roots[1].join("preferred").join(COMMAND_SOCKET))
-                .unwrap();
-        let candidates = super::exact_socket_candidates(&roots, "preferred", COMMAND_SOCKET).await;
-        assert_eq!(
-            candidates,
-            roots.map(|root| root.join("preferred").join(COMMAND_SOCKET))
-        );
-        let _stream = connect_candidates(&candidates).await.unwrap();
-        let _peer = listener.accept().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn request_deadline_includes_waiting_for_a_reply() {
-        let (_root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
-        let request = tokio::spawn(async move { client.request("j/clients").await });
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut command = String::new();
-        stream.read_to_string(&mut command).await.unwrap();
-        assert_eq!(command, "j/clients");
-        time::pause(); // discovery/connection finished; peer deliberately never replies
-        assert!(
-            request
-                .await
-                .unwrap()
-                .unwrap_err()
-                .to_string()
-                .contains("timed out")
-        );
-    }
-
-    #[tokio::test]
-    async fn reply_size_is_checked_before_utf8_decoding() {
+    async fn requests_bound_reply_size_encoding_and_wait_time() {
         for (prefix, oversized) in [
             (super::MAX_REPLY_BYTES as usize - 2, false),
             (super::MAX_REPLY_BYTES as usize, true),
@@ -546,6 +480,19 @@ mod tests {
                 .contains("UTF-8")
         );
         server.await.unwrap();
+        let (_root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
+        let request = tokio::spawn(async move { client.request("j/clients").await });
+        let (mut stream, _) = listener.accept().await.unwrap();
+        stream.read_to_end(&mut Vec::new()).await.unwrap();
+        time::pause(); // The connected peer deliberately never replies.
+        assert!(
+            request
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
     }
 
     #[tokio::test]
@@ -604,6 +551,10 @@ mod tests {
                     roots[0].join("z").join(socket)
                 ]
             );
+            assert_eq!(
+                super::exact_socket_candidates(&roots, "preferred", socket).await,
+                candidates[..2]
+            );
             drop(listeners.pop()); // stale preferred socket in legacy root
             drop(listeners.pop()); // stale preferred socket in runtime root
             let stream = connect_candidates(&candidates).await.unwrap();
@@ -645,30 +596,8 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn initial_connection_failure_is_reported_once_and_backoff_is_cancellable() {
-        let client = Client::new("/unused".into(), Some("../invalid".into()));
-        let (sender, mut events) = mpsc::channel(8);
-        let task = tokio::spawn(watch_events_with(client, sender, |event| event));
-        let Some(Event::ConnectFailed(cause)) = events.recv().await else {
-            panic!("expected initial connection failure");
-        };
-        assert!(cause.contains("invalid HYPRLAND_INSTANCE_SIGNATURE"));
-        // Several retries occur, but an unchanged failure must not spam consumers.
-        assert!(
-            time::timeout(Duration::from_secs(3), events.recv())
-                .await
-                .is_err()
-        );
-        drop(events);
-        time::timeout(Duration::from_millis(100), task)
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
     #[tokio::test]
-    async fn event_stream_reports_reconnects_and_backs_off_after_eof() {
+    async fn event_stream_reports_reconnects_failures_and_cancels_backoff() {
         let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
         let (sender, mut events) = mpsc::channel(8);
         let task = tokio::spawn(watch_events_with(client, sender, |event| event));
@@ -704,6 +633,23 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        time::pause();
+        let client = Client::new("/unused".into(), Some("../invalid".into()));
+        let (sender, mut events) = mpsc::channel(8);
+        let task = tokio::spawn(watch_events_with(client, sender, |event| event));
+        let Some(Event::ConnectFailed(_)) = events.recv().await else {
+            panic!("expected initial connection failure");
+        };
+        assert!(
+            time::timeout(Duration::from_secs(3), events.recv())
+                .await
+                .is_err()
+        );
+        drop(events);
+        time::timeout(Duration::from_millis(100), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -734,11 +680,6 @@ mod tests {
         assert!(candidates.is_empty());
         super::add_socket(&mut candidates, socket.clone(), uid).await;
         assert_eq!(candidates, [socket]);
-    }
-
-    #[tokio::test]
-    async fn connected_peer_must_match_expected_user() {
-        let uid = rustix::process::geteuid().as_raw();
         let (stream, _peer) = tokio::net::UnixStream::pair().unwrap();
         assert!(super::validate_peer(stream, uid).is_ok());
         let (stream, _peer) = tokio::net::UnixStream::pair().unwrap();

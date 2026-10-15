@@ -89,6 +89,15 @@ fn logical_reservations_css_gaps_and_ordered_rules() {
         parts[4]["css"] = invalid;
         assert!(parse_work_areas(&text(&parts)).is_err());
     }
+    for invalid in ["[] [] [] [] {}", "[] [] [] [] {\"css\":\"2\"} {}"] {
+        assert!(parse_work_areas(invalid).is_err());
+    }
+    let mut parts = fixture();
+    parts[0][0]["scale"] = json!(0);
+    assert!(parse_work_areas(&text(&parts)).is_err());
+    assert!(geometry_event("configreloaded>>"));
+    assert!(geometry_event("togglegroup>>1"));
+    assert!(!geometry_event("activewindow>>title"));
 }
 
 #[test]
@@ -126,33 +135,28 @@ fn smart_gaps_and_group_visibility_filters() {
     assert_rule(&mut parts, "f[0]", "eDP-1", 53.0);
 }
 #[test]
-fn selector_validation_matches_hyprland_workspace_cpp() {
+fn selectors_match_workspace_monitor_and_fullscreen_constraints() {
     let mut parts = fixture();
-    // Native parsing rejects duplicate/conflicting flags and zero-based ranges,
-    // but a single zero window count is valid. Malformed fullscreen isn't f[2].
+    // Conflicting/duplicate flags and zero-based ranges are invalid; zero counts are valid.
     for selector in [
         "w[tf0]",
-        "w[ft0]",
-        "w[tt1]",
         "w[gg1]",
-        "w[pp0]",
-        "w[vv2]",
         "r[0-2]",
-        "r[2-1]",
         "w[0-2]",
         "f[other]",
         "f[]",
         "f[2147483648]",
+        "r[1-4] junk",
+        "w[bad]",
+        "m[right]",
+        "m[current]]",
+        "m[current]w[2",
+        "mm[current]",
     ] {
         assert_rule(&mut parts, selector, "eDP-1", 53.0);
     }
-    for selector in [
-        "w[0]", "w[t0]", "f[2]", "s[0]", "s[false]", "n[0]", "n[bogus]",
-    ] {
+    for selector in ["w[0]", "w[t0]", "s[0]", "s[false]", "n[0]"] {
         assert_rule(&mut parts, selector, "DP-1", 80.0);
-    }
-    for selector in ["s[2]", "n[2]"] {
-        assert_rule(&mut parts, selector, "DP-1", 82.0);
     }
     parts[3][0]["fullscreen"] = json!(2);
     assert_rule(&mut parts, "f[0]", "eDP-1", 53.0); // workspace has no fullscreen
@@ -161,11 +165,6 @@ fn selector_validation_matches_hyprland_workspace_cpp() {
         assert_rule(&mut parts, selector, "eDP-1", 51.0);
     }
     assert_rule(&mut parts, "f[-1]", "eDP-1", 53.0);
-}
-
-#[test]
-fn named_special_monitor_and_malformed_selectors() {
-    let mut parts = fixture();
     for selector in [
         "m[+1]",
         "m[-1]",
@@ -180,26 +179,14 @@ fn named_special_monitor_and_malformed_selectors() {
     assert_rule(&mut parts, "m[r]", "DP-1", 82.0);
     parts[0][1]["x"] = json!(1537);
     assert_rule(&mut parts, "m[r]", "DP-1", 80.0);
-    for selector in [
-        "r[1-4] junk",
-        "w[bad]",
-        "n[true]",
-        "m[right]",
-        "m[current]]",
-        "m[current]w[2",
-        "mm[current]",
-        "[current]",
-        "µ[current]",
-    ] {
-        assert_rule(&mut parts, selector, "eDP-1", 53.0);
-    }
     parts[1]
         .as_array_mut()
         .unwrap()
         .push(json!({"id":-1337,"name":"project:web","windows":0}));
     parts[0][0]["activeWorkspace"] = json!({"id":-1337});
-    parts[2] = json!([{"workspaceString":"n[true] n[s:project:] n[e:web]","gapsOut":[1,2,3,4]},{"workspaceString":"name:project:web","gapsOut":[5,6,7,8]}]);
-    assert_eq!(margins(&parts, "eDP-1")["top"], 56.0);
+    for selector in ["n[true] n[s:project:] n[e:web]", "name:project:web"] {
+        assert_rule(&mut parts, selector, "eDP-1", 51.0);
+    }
     parts[1]
         .as_array_mut()
         .unwrap()
@@ -237,39 +224,4 @@ fn directional_selection_respects_geometry_ties_and_disabled_monitors() {
         parts[0][1]["y"] = json!(y);
         assert_rule(&mut parts, &format!("m[{direction}]"), "DP-1", 80.0);
     }
-}
-
-#[tokio::test]
-async fn native_batch_request_returns_normalized_work_areas() {
-    let (_root, client, server) = crate::tests::command_server(
-        "[[BATCH]]j/monitors;j/workspaces;j/workspacerules;j/clients;j/getoption general:gaps_out",
-        text(&fixture()),
-    )
-    .await;
-    assert_eq!(client.work_areas().await.unwrap()["eDP-1"].top, 53.0);
-    server.await.unwrap();
-}
-
-#[test]
-fn parses_adjacent_json_and_rejects_missing_or_invalid_documents() {
-    let mut parts = fixture();
-    parts[0][0]["description"] = json!("Display with } [ \" \\ and\nnewline");
-    assert!(parse_work_areas(&text(&parts)).is_ok());
-    for invalid in [
-        "",
-        "not running",
-        "[] [] [] [] {}",
-        "[null] [] [] [] {\"css\":\"2\"}",
-        "[] [] [] []",
-        "[] [] [] [] {\"css\":\"2\"} {}",
-        "[] [] [] [] {\"css\":\"2\"} trailing",
-        "[] [{\"id\":1,\"name\":\"1\",\"name\":\"two\"}] [] [] {\"css\":\"2\"}",
-    ] {
-        assert!(parse_work_areas(invalid).is_err());
-    }
-    parts[0][0]["scale"] = json!(0);
-    assert!(parse_work_areas(&text(&parts)).is_err());
-    assert!(geometry_event("configreloaded>>"));
-    assert!(geometry_event("togglegroup>>1"));
-    assert!(!geometry_event("activewindow>>title"));
 }

@@ -246,17 +246,6 @@ mod tests {
         release
     }
 
-    #[test]
-    fn synchronous_calls_share_reply_and_panic_handling() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let lane = BlockingLane::start(runtime.handle(), "sync", 1, 1);
-        assert_eq!(lane.call(|| 42), Ok(42));
-        assert_eq!(lane.call(|| panic!("injected")), Err(LaneError::Panicked));
-        assert_eq!(lane.call(|| 7), Ok(7));
-        runtime.block_on(lane.shutdown(Duration::from_secs(1)));
-        assert_eq!(lane.call(|| 0), Err(LaneError::Closed));
-    }
-
     #[tokio::test]
     async fn bounds_admission_contains_panics_and_rejects_after_shutdown() {
         let lane = BlockingLane::start(&tokio::runtime::Handle::current(), "test", 1, 1);
@@ -270,8 +259,13 @@ mod tests {
             Err(LaneError::Panicked)
         );
         assert_eq!(lane.call_async(|| 7).await.unwrap(), 7);
-        assert_eq!(lane.shutdown(Duration::from_secs(1)).await.active_jobs, 0);
+        let release = hold_job(&lane).await;
+        let queued = lane.call_async(|| 42);
+        assert_eq!(lane.shutdown(Duration::from_millis(5)).await.active_jobs, 1);
+        assert_eq!(queued.await, Err(LaneError::Closed));
         assert_eq!(lane.try_submit(|| {}), Err(LaneError::Closed));
+        release.send(()).unwrap();
+        assert_eq!(lane.shutdown(Duration::from_secs(1)).await.active_jobs, 0);
     }
     #[tokio::test]
     async fn cancelled_waiters_keep_admission_and_control_lane_stays_available() {
@@ -299,17 +293,5 @@ mod tests {
         assert_eq!(queued.await.unwrap(), 42);
         requests.shutdown(Duration::from_secs(1)).await;
         controls.shutdown(Duration::from_secs(1)).await;
-    }
-
-    #[tokio::test]
-    async fn timeout_reports_running_jobs_and_drops_queued_replies() {
-        let lane = BlockingLane::start(&tokio::runtime::Handle::current(), "slow", 1, 1);
-        let release = hold_job(&lane).await;
-        let queued = lane.call_async(|| 42);
-        let report = lane.shutdown(Duration::from_millis(5)).await;
-        assert_eq!(report.active_jobs, 1);
-        assert_eq!(queued.await, Err(LaneError::Closed));
-        release.send(()).unwrap();
-        assert_eq!(lane.shutdown(Duration::from_secs(1)).await.active_jobs, 0);
     }
 }

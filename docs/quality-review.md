@@ -4,6 +4,8 @@ Latest focused reviews: [RQLens refactor](reviews/rqlens-2026-10-15.md) and
 [next five improvements](reviews/rqlens-next-five-2026-10-15.md), 2026-10-15.
 The historical measurements below retain their original baselines.
 
+Current test reduction: [115 to 77 tests, 2026-10-15](reviews/test-reduction-2026-10-15.md).
+
 The measurements below predate the [native local-build migration](local-build.md).
 The build utility and its original 13 Python test scenarios now live in Rust and
 run through Cargo; historical measurements and validation commands are retained

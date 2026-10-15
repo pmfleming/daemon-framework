@@ -146,10 +146,6 @@ mod tests {
         assert_eq!(Arc::strong_count(&tasks), 1);
         assert!(!tasks.spawn("closed", async {}));
         tasks.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn panic_remains_a_failed_join() {
         assert!(
             spawn_named("panic", async { panic!("injected") })
                 .await

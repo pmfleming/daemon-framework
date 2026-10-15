@@ -254,7 +254,12 @@ pub(crate) mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        let parent = path.parent().unwrap();
+        assert_eq!(
+            fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read_dir(parent).unwrap().count(), 1);
         let target = root.0.join("directory");
         fs::create_dir(&target).unwrap();
         assert!(write_bytes_atomic(&target, b"bad", AtomicFilePolicy::DURABLE).is_err());
@@ -263,36 +268,6 @@ pub(crate) mod tests {
             parent_directory(Path::new("relative.json")).unwrap(),
             Path::new(".")
         );
-    }
-
-    #[test]
-    fn ancestor_sync_policy_preserves_nested_creation_and_private_modes() {
-        let root = Directory::new();
-        for sync_new_ancestors in [false, true] {
-            let path = root
-                .0
-                .join(sync_new_ancestors.to_string())
-                .join("nested/data");
-            let policy = AtomicFilePolicy {
-                sync_parent: false,
-                sync_new_ancestors,
-                ..AtomicFilePolicy::PRIVATE
-            };
-            write_bytes_atomic(&path, b"old", policy).unwrap();
-            let parent = path.parent().unwrap();
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
-            write_bytes_atomic(&path, b"new", policy).unwrap();
-            assert_eq!(fs::read(&path).unwrap(), b"new");
-            assert_eq!(
-                fs::metadata(parent).unwrap().permissions().mode() & 0o777,
-                0o700
-            );
-            assert_eq!(
-                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-            assert_eq!(fs::read_dir(parent).unwrap().count(), 1);
-        }
     }
 
     #[test]

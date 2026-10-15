@@ -165,7 +165,7 @@ mod tests {
     use serde_json::json;
     const API: ApiIdentity = ApiIdentity::new("test-api", crate::CONTRACT_VERSION);
     #[test]
-    fn payload_is_nested_exactly_once_and_cannot_spoof_correlation() {
+    fn event_envelopes_preserve_identity_correlation_and_gap_precision() {
         let data = json!({"protocol":"foreign", "request_id":"foreign", "operation":{"id":"op"}});
         let event = Event::new(
             API,
@@ -184,9 +184,6 @@ mod tests {
             json!({"protocol":"test-api", "version":2, "stream":"operations", "event":"completed", "subscription_id":"sub", "request_id":"req", "data":data})
         );
         assert!(event.get("operation").is_none());
-    }
-    #[test]
-    fn gap_is_not_failure_and_large_counts_are_exact() {
         let gap = Event::new(
             API,
             "operations",

@@ -204,50 +204,11 @@ fn snapshots_capture_dirty_files_preserve_metadata_and_confine_symlinks() {
 }
 
 #[test]
-fn branch_and_revision_pins_rejected() {
-    let repos = Repositories::new();
-    for suffix in ["?ref=main", "?rev=123", "#main"] {
-        assert!(
-            local_path(
-                &json!({"url": format!("git+file:../daemon-framework{suffix}")}),
-                repos.0.path()
-            )
-            .is_err()
-        );
-    }
-    assert_eq!(
-        local_path(
-            &json!({"url": "git+file:../daemon-framework"}),
-            &repos.path("app-daemon")
-        )
-        .unwrap(),
-        Some(repos.path("daemon-framework"))
-    );
-    assert!(local_path(&json!({"url": "git+file://remote/project"}), repos.0.path()).is_err());
-    assert!(
-        local_path(&json!({"url": "github:someone/project"}), repos.0.path())
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        local_path(
-            &json!({"url": "git+file:../with%20space"}),
-            &repos.path("app-daemon")
-        )
-        .unwrap(),
-        Some(repos.path("with space"))
-    );
-    let absolute = format!("git+file://localhost{}", repos.path("project").display());
-    assert_eq!(
-        local_path(&json!({"url": absolute}), repos.0.path()).unwrap(),
-        Some(repos.path("project"))
-    );
-}
-
-#[test]
-fn one_snapshot_shared_by_all_edges_and_no_live_lock_write() {
+fn snapshots_share_sources_and_preserve_live_locks_on_success_or_failure() {
     let repos = Repositories::new();
     let (root, app, framework) = repos.matrix();
+    fs::write(root.join("flake.lock"), "original lock").unwrap();
+    git(&root, &["add", "flake.lock"]);
     fs::write(framework.join("source"), "dirty framework").unwrap();
     let mut input = definitions(&root);
     input.insert(
@@ -278,19 +239,58 @@ fn one_snapshot_shared_by_all_edges_and_no_live_lock_write() {
         .position(|arg| arg == "daemon-framework")
         .unwrap();
     assert_eq!(command[alias + 1], command[primary + 1]);
-    for source in [&root, &app, &framework] {
+    for source in [&app, &framework] {
         assert!(!source.join("flake.lock").exists());
     }
     let saved: Value =
         serde_json::from_slice(&fs::read(repos.path("snapshots/sources.json")).unwrap()).unwrap();
     assert_eq!(saved, serde_json::to_value(result).unwrap());
+    assert_eq!(
+        fs::read_to_string(root.join("flake.lock")).unwrap(),
+        "original lock"
+    );
+    nix.fail_lock = true;
+    error_contains(
+        prepare(&mut nix, &root, &repos.path("failed"), false),
+        "injected lock failure",
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("flake.lock")).unwrap(),
+        "original lock"
+    );
+    assert!(!repos.path("failed/sources.json").exists());
 }
 
 #[test]
-fn root_policy_rejects_pins_divergent_follows_and_standalone_framework_crates() {
+fn source_policy_rejects_pins_divergent_edges_and_private_frameworks() {
     let repos = Repositories::new();
     let (root, app, framework) = repos.matrix();
-    let mut sources = sources(&[&app, &framework]);
+    let captured = sources(&[&app, &framework]);
+    for url in [
+        "git+file:../daemon-framework?ref=main",
+        "git+file:../daemon-framework?rev=123",
+        "git+file:../daemon-framework#main",
+        "git+file://remote/project",
+    ] {
+        let mut root_inputs = definitions(&root);
+        root_inputs.insert("daemon-framework".into(), json!({"url":url}));
+        error_contains(
+            validate_policy(&captured, &root_inputs),
+            "current worktrees",
+        );
+    }
+    for (url, expected) in [
+        ("git+file:../with%20space".into(), repos.path("with space")),
+        (
+            format!("git+file://localhost{}", repos.path("project").display()),
+            repos.path("project"),
+        ),
+    ] {
+        assert_eq!(
+            local_path(&json!({"url":url}), &app).unwrap(),
+            Some(expected)
+        );
+    }
     for (overlay, reason) in [
         (
             json!({"daemon-framework":{"url":"github:pmfleming/daemon-framework/old"}}),
@@ -311,22 +311,8 @@ fn root_policy_rejects_pins_divergent_follows_and_standalone_framework_crates() 
     ] {
         let mut root_inputs = definitions(&root);
         merge(&mut root_inputs, &inputs(overlay));
-        error_contains(validate_policy(&sources, &root_inputs), reason);
+        error_contains(validate_policy(&captured, &root_inputs), reason);
     }
-    std::rc::Rc::make_mut(&mut sources.get_mut(&app).unwrap().inputs).insert(
-        "hyprlandIpc".into(),
-        json!({"url":"git+file:../shelllist-hyprland"}),
-    );
-    error_contains(
-        validate_policy(&sources, &definitions(&root)),
-        "not a separate input",
-    );
-}
-
-#[test]
-fn hyprland_consumers_require_the_framework_crate() {
-    let repos = Repositories::new();
-    let (root, app, framework) = repos.matrix();
     let manifest = fs::read_to_string(app.join("Cargo.toml")).unwrap();
     let bar = repos.repository(
         "bar-daemon",
@@ -339,7 +325,7 @@ fn hyprland_consumers_require_the_framework_crate() {
         Value::Object(definitions(&app)),
         &[("Cargo.toml", &manifest.replace(valid, ""))],
     );
-    let sources = sources(&[&app, &bar, &bt, &framework]);
+    let mut sources = sources(&[&app, &bar, &bt, &framework]);
     let root_inputs = definitions(&root);
     validate_policy(&sources, &root_inputs).unwrap();
     for consumer in [&app, &bar] {
@@ -367,6 +353,14 @@ fn hyprland_consumers_require_the_framework_crate() {
             fs::remove_dir(consumer.join(private)).unwrap();
         }
     }
+    std::rc::Rc::make_mut(&mut sources.get_mut(&app).unwrap().inputs).insert(
+        "hyprlandIpc".into(),
+        json!({"url":"git+file:../shelllist-hyprland"}),
+    );
+    error_contains(
+        validate_policy(&sources, &root_inputs),
+        "not a separate input",
+    );
 }
 
 #[test]
@@ -521,23 +515,4 @@ fn preflight_walks_distinct_overlays_and_rejects_cycles() {
             "input overrides must be an object",
         );
     }
-}
-
-#[test]
-fn failed_lock_never_writes_live_locks_or_success_manifest() {
-    let repos = Repositories::new();
-    let root = repos.repository("project", json!({}), &[("flake.lock", "original lock")]);
-    let mut nix = TestNix {
-        fail_lock: true,
-        ..TestNix::default()
-    };
-    error_contains(
-        prepare(&mut nix, &root, &repos.path("failed"), false),
-        "injected lock failure",
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("flake.lock")).unwrap(),
-        "original lock"
-    );
-    assert!(!repos.path("failed/sources.json").exists());
 }

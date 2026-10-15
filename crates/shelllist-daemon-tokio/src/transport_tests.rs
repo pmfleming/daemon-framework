@@ -52,7 +52,7 @@ impl Drop for Bus {
 }
 
 #[tokio::test]
-async fn monitors_with_identical_unique_names_on_different_buses_are_independent() {
+async fn owner_monitors_isolate_buses_and_report_owner_loss_and_bus_failure() {
     let first = Bus::start();
     let second = Bus::start();
     let server_a = first.connection().await;
@@ -65,7 +65,7 @@ async fn monitors_with_identical_unique_names_on_different_buses_are_independent
     let monitor_b = crate::OwnerLossMonitor::new(server_b);
     // Establish both match rules before disconnecting either caller.
     let _a = monitor_a.subscribe().await.unwrap();
-    let _b = monitor_b.subscribe().await.unwrap();
+    let mut losses = monitor_b.subscribe().await.unwrap();
     caller_a.close().await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), monitor_a.wait(&owner))
         .await
@@ -81,14 +81,8 @@ async fn monitors_with_identical_unique_names_on_different_buses_are_independent
         .await
         .unwrap()
         .unwrap();
-}
-
-#[tokio::test]
-async fn losing_the_bus_wakes_monitor_receivers_with_failure() {
-    let bus = Bus::start();
-    let monitor = crate::OwnerLossMonitor::new(bus.connection().await);
-    let mut losses = monitor.subscribe().await.unwrap();
-    drop(bus);
+    assert_eq!(losses.recv().await.unwrap(), owner);
+    drop(second);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), losses.recv())
             .await

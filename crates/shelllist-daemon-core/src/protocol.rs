@@ -36,19 +36,3 @@ pub fn registry_names<'a>(registry: &'a Value, section: &str) -> Result<Vec<&'a 
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{fixture_names, validate_unique_names};
-
-    #[test]
-    fn validates_names_and_extracts_fixture_sections() -> Result<(), String> {
-        assert!(validate_unique_names(&["one", "two"]).is_ok());
-        assert!(validate_unique_names(&["one", "one"]).is_err());
-        let fixture = json!({ "registry": { "methods": [{ "name": "one" }] } });
-        assert_eq!(fixture_names(&fixture, "methods")?, ["one"]);
-        Ok(())
-    }
-}

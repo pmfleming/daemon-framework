@@ -158,9 +158,9 @@ fn render_names(variable: &str, names: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{check_schema, render};
-    use serde_json::json;
+    use serde_json::{Value, json};
     #[test]
-    fn generation_rejects_unsupported_assertions_and_external_references() {
+    fn generation_validates_contracts_and_rejects_unsupported_schemas() {
         assert!(check_schema(&json!({"type":"array", "uniqueItems":true})).is_err());
         assert!(check_schema(&json!({"$ref":"https://example.invalid/schema"})).is_err());
         assert!(check_schema(&json!({"properties":{"nested":{"multipleOf":2}}})).is_err());
@@ -168,15 +168,27 @@ mod tests {
             check_schema(&json!({"type":["string","null"], "$defs":{"x":{"type":"integer"}}}))
                 .is_ok()
         );
-    }
-
-    #[test]
-    fn generation_preserves_optional_contracts_and_sorted_keys() {
         let output = render(&json!({"protocol":"test", "version":2, "registry":{
             "methods":[{"name":"bare"}, {"name":"typed", "params_schema":true, "result_schema":false}],
             "streams":[{"name":"updates", "events":[{"name":"changed", "data_schema":true}]}]
         }})).unwrap();
-        assert!(output.contains("var contracts = {\"typed\":{\"params_schema\":true,\"policy\":null,\"response_key\":null,\"result_schema\":false}};"));
-        assert!(output.contains("var eventContracts = {\"updates:changed\":true};"));
+        // Check the generated contract data, not JSON object-key ordering.
+        let declaration = |prefix: &str| -> Value {
+            let json = output
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap();
+            serde_json::from_str(json.trim_end_matches(';')).unwrap()
+        };
+        assert_eq!(
+            declaration("var contracts = "),
+            json!({"typed": {
+                "params_schema": true, "result_schema": false, "response_key": null, "policy": null
+            }})
+        );
+        assert_eq!(
+            declaration("var eventContracts = "),
+            json!({"updates:changed": true})
+        );
     }
 }

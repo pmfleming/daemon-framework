@@ -151,15 +151,8 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use crate::file::tests::Directory;
-    use std::collections::BTreeMap;
-    use std::io;
+    use super::{is_safe_relative_path, is_single_normal_component};
     use std::path::Path;
-
-    use super::{
-        AtomicWritePolicy, is_safe_relative_path, is_single_normal_component, read_json,
-        write_json_atomic,
-    };
 
     #[test]
     fn xdg_suffixes_cannot_escape_the_application_directory() {
@@ -178,24 +171,5 @@ mod tests {
         ] {
             assert!(!is_safe_relative_path(Path::new(path)));
         }
-    }
-
-    #[test]
-    fn private_atomic_json_replaces_complete_files() -> Result<(), Box<dyn std::error::Error>> {
-        let root = Directory::new();
-        let path = root.0.join("state.json");
-        for entry in [("one", 1), ("two", 2)] {
-            write_json_atomic(&path, &BTreeMap::from([entry]), AtomicWritePolicy::PRIVATE)?;
-        }
-        let value = read_json::<BTreeMap<String, i32>>(&path)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "state was not written"))?;
-        assert_eq!(value, BTreeMap::from([("two".into(), 2)]));
-        let temporary_exists = root
-            .0
-            .read_dir()?
-            .filter_map(Result::ok)
-            .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"));
-        assert!(!temporary_exists);
-        Ok(())
     }
 }

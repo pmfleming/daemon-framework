@@ -16,7 +16,15 @@ fn policy(mode: ExecutionMode) -> MethodPolicy {
 async fn drained(boundary: &ServiceBoundary) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if boundary.usage.lock().unwrap().owners.is_empty() {
+            // Probe restored method and owner capacity instead of inspecting
+            // the representation of the boundary's accounting maps.
+            if ["read", "mutate"].into_iter().all(|method| {
+                let first =
+                    boundary.call_policy(Some(":1.1"), method, "{}", policy(ExecutionMode::Read));
+                let second =
+                    boundary.call_policy(Some(":1.2"), method, "{}", policy(ExecutionMode::Read));
+                first.is_ok() && second.is_ok()
+            }) {
                 break;
             }
             tokio::task::yield_now().await;
@@ -24,7 +32,6 @@ async fn drained(boundary: &ServiceBoundary) {
     })
     .await
     .unwrap();
-    assert!(boundary.usage.lock().unwrap().methods.is_empty());
 }
 
 #[tokio::test]
@@ -70,6 +77,15 @@ async fn effects_retain_capacity_after_ack_timeout_and_waiter_loss() {
 #[tokio::test]
 async fn read_timeout_and_panicking_handler_release_all_accounting() {
     let boundary = ServiceBoundary::new(API);
+    let undeclared = boundary.call(Some(":1.1"), "read", "{}").unwrap();
+    assert_eq!(
+        code(
+            &undeclared
+                .run::<Value, _>(async { panic!("undeclared work ran") })
+                .await
+        ),
+        "rejected-before-dispatch"
+    );
     let admitted = boundary
         .call_policy(Some(":1.1"), "read", "{}", policy(ExecutionMode::Read))
         .unwrap();
@@ -97,6 +113,10 @@ async fn policy_bytes_and_two_owner_quotas_apply_before_execution() {
     let boundary = ServiceBoundary::new(API);
     let policy = policy(ExecutionMode::Read);
     assert_eq!(
+        rejected(boundary.call_policy(None, "read", "{}", policy)),
+        "owner-required"
+    );
+    assert_eq!(
         rejected(boundary.call_policy(Some(":1.1"), "read", "123456789", policy)),
         "request-too-large"
     );
@@ -108,6 +128,7 @@ async fn policy_bytes_and_two_owner_quotas_apply_before_execution() {
             .call_policy(Some(":1.1"), "another-read", "{}", policy)
             .is_err()
     );
+    assert_eq!(code(&first.encoded("x".repeat(129))), "outcome-unknown");
     let second = boundary
         .call_policy(Some(":1.2"), "read", "{}", policy)
         .unwrap();

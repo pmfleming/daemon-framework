@@ -189,11 +189,16 @@ mod tests {
             task::{Context, Poll, Waker},
         };
         assert_eq!(METHODS, &["test.count"]);
+        assert!(crate::validate_unique_names(METHODS).is_ok());
+        assert!(crate::validate_unique_names(&[METHODS[0], METHODS[0]]).is_err());
         assert_eq!(Method::ALL[0].name(), METHODS[0]);
         assert_eq!(Method::Count.response_key(), "count");
         let entry = Method::Count.registry_entry();
         assert_eq!(entry["params_schema"]["additionalProperties"], false);
         assert_eq!(entry["result_schema"]["type"], "integer");
+        let schemas = method_schemas::<Params, Params>();
+        assert!(schemas["params_schema"].get("required").is_none());
+        assert_eq!(schemas["result_schema"]["required"], json!(["count"]));
         assert!(Request::decode("missing", json!({})).is_err());
         assert!(Request::decode("test.count", json!({"count":"wrong"})).is_err());
         let request = Request::decode("test.count", json!({"count":4})).unwrap();
@@ -204,12 +209,5 @@ mod tests {
                 .poll(&mut Context::from_waker(Waker::noop())),
             Poll::Ready(Ok(json!({"count":4})))
         );
-    }
-    #[test]
-    fn schemas_preserve_request_defaults_but_require_serialized_reply_fields() {
-        let schemas = method_schemas::<Params, Params>();
-        assert!(schemas["params_schema"].get("required").is_none());
-        assert_eq!(schemas["params_schema"]["additionalProperties"], false);
-        assert_eq!(schemas["result_schema"]["required"], json!(["count"]));
     }
 }

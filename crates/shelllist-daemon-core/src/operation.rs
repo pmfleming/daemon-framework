@@ -206,33 +206,6 @@ mod tests {
         assert!(active.admit(Some("b")).is_ok());
     }
     #[test]
-    fn pruning_preserves_the_live_suffix_and_exact_expiry_boundary() {
-        let ttl = Duration::from_secs(2);
-        let now = Instant::now();
-        let mut recent = RecentResults::new(4, None);
-        for id in 0..4 {
-            recent.record(id.to_string(), None, id);
-            recent.entries.back_mut().unwrap().recorded = now - Duration::from_secs(3 - id);
-        }
-        recent.prune(now + ttl);
-        assert_eq!(recent.entries.len(), 4); // No TTL means no expiry.
-        recent.retention = Some(ttl);
-        recent.prune(now - Duration::from_secs(4)); // Earlier samples cannot expire entries.
-        assert_eq!(recent.entries.len(), 4);
-        recent.prune(now);
-        assert_eq!(
-            recent
-                .entries
-                .iter()
-                .map(|entry| entry.value)
-                .collect::<Vec<_>>(),
-            [2, 3]
-        );
-        recent.prune(now + ttl);
-        assert!(recent.is_empty());
-    }
-
-    #[test]
     fn terminal_results_are_bounded_replaced_and_expire() {
         let ttl = Duration::from_secs(5);
         let mut recent = RecentResults::new(2, Some(ttl));
@@ -243,7 +216,18 @@ mod tests {
         assert!(recent.get_owned("1", Some("b")).is_none());
         recent.record("1".into(), Some("a".into()), 42);
         assert_eq!(recent.values().copied().collect::<Vec<_>>(), vec![2, 42]);
-        recent.prune(Instant::now() + ttl);
+        // Seed timestamps only to avoid sleeps; assert expiry through owned lookup.
+        let now = Instant::now();
+        recent.entries.front_mut().unwrap().recorded = now - ttl;
+        recent.entries.back_mut().unwrap().recorded = now;
+        recent.prune(now);
+        assert!(recent.get_owned("2", Some("a")).is_none());
+        assert_eq!(recent.get_owned("1", Some("a")), Some(&42));
+        recent.prune(now + ttl);
         assert!(recent.is_empty());
+        let mut permanent = RecentResults::new(1, None);
+        permanent.record("kept".into(), None, 7);
+        permanent.prune(Instant::now() + Duration::from_secs(3600));
+        assert_eq!(permanent.get_owned("kept", None), Some(&7));
     }
 }

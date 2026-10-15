@@ -225,7 +225,8 @@ impl Drop for OwnedTaskRegistry {
 #[cfg(test)]
 mod tests {
     use super::{OwnedTaskRegistry, TaskAdmissionError, TaskLimits};
-    use std::{future::pending, sync::Arc};
+    use std::future::pending;
+    use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn admission_cancellation_and_shutdown_are_owner_scoped() {
@@ -258,42 +259,40 @@ mod tests {
         assert!(!registry.cancel_owned("one", Some("b")).await);
         assert!(registry.cancel_owned("one", Some("a")).await);
         assert!(registry.cancel_owned("two", Some("b")).await);
+        for (id, owner, panics) in [("one", "a", false), ("two", "b", true)] {
+            let (done, completed) = oneshot::channel();
+            registry
+                .spawn_until(id.into(), Some(owner.into()), pending(), async move {
+                    done.send(()).unwrap();
+                    assert!(!panics, "injected worker panic");
+                })
+                .unwrap();
+            completed.await.unwrap();
+            // Both completion and panic restore public admission for this owner/ID.
+            registry
+                .spawn_until(id.into(), Some(owner.into()), pending(), pending())
+                .unwrap();
+        }
         registry.shutdown().await;
         assert_eq!(
             registry.spawn_until("late".into(), None, pending(), pending()),
             Err(TaskAdmissionError::Closed)
         );
-    }
-
-    #[tokio::test]
-    async fn immediate_completion_panic_and_stop_remove_registration() {
         let registry = OwnedTaskRegistry::default();
+        let (held, released) = oneshot::channel::<()>();
         registry
-            .spawn_until("complete".into(), None, pending(), async {})
-            .unwrap();
-        registry
-            .spawn_until("panic".into(), None, pending(), async {
-                panic!("injected")
-            })
-            .unwrap();
-        registry
-            .spawn_until("stop".into(), None, async {}, pending())
-            .unwrap();
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(registry.state.lock().unwrap().tasks.iter().count(), 0);
-        let marker = Arc::new(());
-        let held = marker.clone();
-        registry
-            .spawn_until("pending".into(), None, pending(), async move {
+            .spawn_until("drop".into(), None, pending(), async move {
                 let _held = held;
                 pending::<()>().await;
             })
             .unwrap();
         drop(registry);
-        tokio::task::yield_now().await;
-        assert_eq!(Arc::strong_count(&marker), 1);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), released)
+                .await
+                .unwrap()
+                .is_err()
+        );
     }
 
     #[tokio::test]

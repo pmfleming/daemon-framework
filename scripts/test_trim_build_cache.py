@@ -49,10 +49,13 @@ class CacheTests(unittest.TestCase):
             cache.trim_target(self.root, target or self.target, limit, dry_run, self.tracked)
         return output.getvalue()
 
-    def test_under_limit_untouched(self):
-        profile = self.profile()
+    def test_noop_and_dry_run_do_not_change_files(self):
+        self.profile()
+        before = {p: p.stat().st_mtime_ns for p in self.target.rglob("*")}
         self.assertEqual(self.trim(limit=cache.GIB), "")
-        self.assertTrue((profile / "incremental/object").exists())
+        self.assertEqual(before, {p: p.stat().st_mtime_ns for p in self.target.rglob("*")})
+        self.assertIn("would remove", self.trim(dry_run=True))
+        self.assertEqual(before, {p: p.stat().st_mtime_ns for p in self.target.rglob("*")})
 
     def test_incremental_first_and_stop_at_limit(self):
         profile = self.profile()
@@ -71,37 +74,30 @@ class CacheTests(unittest.TestCase):
         self.assertTrue((coverage / ".cargo-lock").exists())
         self.assertTrue((normal / "deps/binary").exists())
 
-    def test_release_cleared_but_locks_preserved(self):
-        profile = self.profile(name="release")
-        inode = (profile / ".cargo-lock").stat().st_ino
-        self.trim()
-        self.assertEqual(list(profile.iterdir()), [profile / ".cargo-lock"])
-        self.assertEqual((profile / ".cargo-lock").stat().st_ino, inode)
+    def test_profiles_cleared_without_replacing_lock_files(self):
+        for base, name in [(self.target, "release"),
+                           (self.target / "x86_64-unknown-linux-gnu", "debug")]:
+            with self.subTest(base=base, name=name):
+                profile = self.profile(base, name)
+                inode = (profile / ".cargo-lock").stat().st_ino
+                self.trim()
+                self.assertEqual(list(profile.iterdir()), [profile / ".cargo-lock"])
+                self.assertEqual((profile / ".cargo-lock").stat().st_ino, inode)
 
-    def test_dry_run_changes_nothing(self):
-        self.profile()
-        before = {p: p.stat().st_mtime_ns for p in self.target.rglob("*")}
-        output = self.trim(dry_run=True)
-        self.assertIn("would remove", output)
-        self.assertEqual(before, {p: p.stat().st_mtime_ns for p in self.target.rglob("*")})
-
-    def test_dry_run_counts_retained_hardlinks(self):
+    def test_dry_run_accounts_for_retained_hardlinks_and_literal_paths(self):
         profile = self.profile()
         binary = self.file(profile / "deps/binary", 8 * 1024 * 1024)
-        retained = self.target / "report-binary"
-        os.link(binary, retained)
-        output = self.trim(limit=1024 * 1024, dry_run=True)
-        self.assertIn("manual review", output)
-        self.assertNotIn("-0.", output)
-        self.assertGreaterEqual(cache.disk_bytes(self.target, [profile]), 8 * 1024 * 1024)
-        self.assertTrue(binary.exists())
-
-    def test_dry_run_exclusion_handles_glob_metacharacters(self):
+        os.link(binary, self.target / "report-binary")
         artifact = self.file(self.target / "cache[one]*?.bin", 1024 * 1024)
         retained = self.file(self.target / "cacheoXX.bin")
         projected = cache.disk_bytes(self.target, [artifact])
         artifact.unlink()
         self.assertEqual(projected, cache.disk_bytes(self.target))
+        output = self.trim(limit=1024 * 1024, dry_run=True)
+        self.assertIn("manual review", output)
+        self.assertNotIn("-0.", output)
+        self.assertGreaterEqual(cache.disk_bytes(self.target, [profile]), 8 * 1024 * 1024)
+        self.assertTrue(binary.exists())
         self.assertTrue(retained.exists())
 
     def test_active_cargo_lock_skips_whole_target(self):
@@ -122,17 +118,15 @@ class CacheTests(unittest.TestCase):
         for path in (report, checkout, source, review_profile / "deps/binary"):
             self.assertTrue(path.exists(), str(path))
 
-    def test_nested_git_inside_profile_preserved(self):
+    def test_source_markers_preserve_entire_profile(self):
         profile = self.profile()
-        self.file(profile / "deps/source/.git", 0)
-        self.assertIn("preserving source", self.trim())
-        self.assertTrue((profile / "deps/binary").exists())
-
-    def test_manifest_inside_profile_preserved(self):
-        profile = self.profile()
-        self.file(profile / "deps/source/Cargo.toml")
-        self.trim()
-        self.assertTrue((profile / "incremental/object").exists())
+        for marker in [".git", "Cargo.toml"]:
+            with self.subTest(marker=marker):
+                path = self.file(profile / "deps/source" / marker)
+                self.assertIn("preserving source", self.trim())
+                self.assertTrue((profile / "incremental/object").exists())
+                self.assertTrue((profile / "deps/binary").exists())
+                path.unlink()
 
     def test_tracked_artifact_preserves_entire_profile(self):
         profile = self.profile()
@@ -140,61 +134,46 @@ class CacheTests(unittest.TestCase):
         self.trim()
         self.assertTrue((profile / "incremental/object").exists())
 
-    def test_target_symlink_refused(self):
-        profile = self.profile()
-        link = self.root / "linked-target"
-        link.symlink_to(self.target, target_is_directory=True)
-        self.assertIn("refusing", self.trim(target=link))
-        self.assertTrue((profile / "deps/binary").exists())
-
-    def test_profile_symlink_not_followed(self):
-        profile = self.profile(self.root / "elsewhere")
-        (self.target / "debug").symlink_to(profile, target_is_directory=True)
-        self.trim()
-        self.assertTrue((profile / "deps/binary").exists())
-
-    def test_artifact_symlink_not_followed(self):
+    def test_profile_and_artifact_symlinks_are_not_followed(self):
+        outside = self.profile(self.root / "elsewhere")
+        (self.target / "release").symlink_to(outside, target_is_directory=True)
         profile = self.profile()
         source = self.file(self.root / "source.txt")
         (profile / "source-link").symlink_to(source)
         self.trim()
+        self.assertTrue((outside / "deps/binary").exists())
         self.assertTrue(source.exists())
         self.assertTrue((profile / "source-link").is_symlink())
 
-    def test_external_target_refused(self):
+    def test_external_symlinked_and_nested_repository_targets_are_refused(self):
+        profile = self.profile()
+        link = self.root / "linked-target"
+        link.symlink_to(self.target, target_is_directory=True)
         external = self.root.parent / "external"
-        profile = self.profile(external)
-        self.assertIn("refusing", self.trim(target=external))
-        self.assertTrue((profile / "deps/binary").exists())
-
-    def test_nested_repository_target_refused(self):
+        external_profile = self.profile(external)
         nested = self.root / "nested"
         self.file(nested / ".git", 0)
-        profile = self.profile(nested / "target")
-        self.assertIn("refusing", self.trim(target=nested / "target"))
-        self.assertTrue((profile / "deps/binary").exists())
+        nested_profile = self.profile(nested / "target")
+        for target, kept in [(link, profile), (external, external_profile),
+                             (nested / "target", nested_profile)]:
+            with self.subTest(target=target):
+                self.assertIn("refusing", self.trim(target=target))
+                self.assertTrue((kept / "deps/binary").exists())
 
     def test_unrecognized_debug_directory_preserved(self):
         source = self.file(self.target / "debug/source.txt")
         self.trim()
         self.assertTrue(source.exists())
 
-    def test_cross_compilation_profile(self):
-        profile = self.profile(self.target / "x86_64-unknown-linux-gnu")
-        self.trim()
-        self.assertFalse((profile / "deps").exists())
-        self.assertTrue((profile / ".cargo-lock").exists())
-
-    def test_nested_targets_discovered_from_manifests(self):
+    def test_target_selection_uses_manifests_or_repository_relative_override(self):
         tracked = {self.root / "Cargo.toml", self.root / "rust/search/Cargo.toml"}
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(set(cache.target_paths(self.root, tracked)), {
-                self.target, self.root / "rust/search/target",
-            })
-
-    def test_relative_override_anchored_to_repository(self):
-        with patch.dict(os.environ, {"CARGO_TARGET_DIR": "build-cache"}):
-            self.assertEqual(cache.target_paths(self.root, set()), [self.root / "build-cache"])
+        for environment, expected in [
+            ({}, {self.target, self.root / "rust/search/target"}),
+            ({"CARGO_TARGET_DIR": "build-cache"}, {self.root / "build-cache"}),
+        ]:
+            with self.subTest(environment=environment):
+                with patch.dict(os.environ, environment, clear=True):
+                    self.assertEqual(set(cache.target_paths(self.root, tracked)), expected)
 
     def test_cli_validation_and_disabled_mode(self):
         with patch.dict(os.environ, {}, clear=True):
