@@ -1,4 +1,5 @@
 //! Direct-bus admission. Bridge framing is not a server-side safety boundary.
+use crate::task::AbortOnDrop;
 use serde::Serialize;
 use shelllist_daemon_core::{ApiError, ApiIdentity, ExecutionMode, MethodPolicy, error};
 use std::{
@@ -55,15 +56,10 @@ impl ServiceBoundary {
         reject(self.api, code, message)
     }
 
-    fn enter(&self, owner: Option<&str>, controls: bool) -> Result<Admitted, String> {
+    fn enter(&self, owner: Option<&str>, lane: &Arc<Semaphore>) -> Result<Admitted, String> {
         if owner.is_none_or(str::is_empty) {
             return Err(self.reject("owner-required", "A D-Bus caller identity is required"));
         }
-        let lane = if controls {
-            &self.controls
-        } else {
-            &self.calls
-        };
         let permit = lane.clone().try_acquire_owned().map_err(|_| {
             self.reject(
                 "rejected-before-dispatch",
@@ -103,7 +99,8 @@ impl ServiceBoundary {
             ));
         }
         let mut admitted = self.call(owner, method, params)?;
-        let owner = owner.expect("admission checked owner");
+        let owner = owner
+            .ok_or_else(|| self.reject("owner-required", "A D-Bus caller identity is required"))?;
         let mut usage = self.usage.lock().unwrap_or_else(|e| e.into_inner());
         if usage.owners.get(owner).copied().unwrap_or(0) >= policy.max_owner_in_flight
             || usage.methods.get(method).copied().unwrap_or(0) >= policy.max_in_flight
@@ -133,7 +130,7 @@ impl ServiceBoundary {
                 "Request exceeds service limits; request was not dispatched",
             ));
         }
-        self.enter(owner, false)
+        self.enter(owner, &self.calls)
     }
 
     pub fn subscribe(&self, owner: Option<&str>, streams: &[String]) -> Result<Admitted, String> {
@@ -143,7 +140,7 @@ impl ServiceBoundary {
                 "Subscription exceeds service limits; request was not dispatched",
             ));
         }
-        self.enter(owner, false)
+        self.enter(owner, &self.calls)
     }
 
     pub fn cancel(&self, owner: Option<&str>, id: &str) -> Result<Admitted, String> {
@@ -153,7 +150,7 @@ impl ServiceBoundary {
                 "Invalid cancellation identifier; request was not dispatched",
             ));
         }
-        self.enter(owner, true)
+        self.enter(owner, &self.controls)
     }
 }
 
@@ -203,19 +200,17 @@ impl Admitted {
         T: Serialize + Send + 'static,
         F: Future<Output = T> + Send + 'static,
     {
-        let policy = self.policy.expect("run requires a declared method policy");
+        let Some(policy) = self.policy else {
+            return reject(
+                self.api,
+                "rejected-before-dispatch",
+                "Execution requires a declared method policy",
+            );
+        };
         let api = self.api;
         let mut task = tokio::spawn(async move { self.encode(&work.await) });
-        struct AbortRead(Option<tokio::task::AbortHandle>);
-        impl Drop for AbortRead {
-            fn drop(&mut self) {
-                if let Some(handle) = &self.0 {
-                    handle.abort();
-                }
-            }
-        }
         let _cancel =
-            AbortRead((policy.execution == ExecutionMode::Read).then(|| task.abort_handle()));
+            (policy.execution == ExecutionMode::Read).then(|| AbortOnDrop(task.abort_handle()));
         match tokio::time::timeout(
             Duration::from_millis(policy.ack_budget_ms.into()),
             &mut task,
@@ -239,7 +234,7 @@ impl Admitted {
         if serde_json::to_writer(&mut writer, value).is_err() {
             return self.unknown();
         }
-        String::from_utf8(writer.bytes).expect("JSON serializer emits UTF-8")
+        String::from_utf8(writer.bytes).unwrap_or_else(|_| self.unknown())
     }
 
     pub fn encoded(&self, response: String) -> String {
@@ -269,9 +264,6 @@ impl Write for BoundedWriter {
     }
 }
 
-#[cfg(test)]
-#[path = "service_policy_tests.rs"]
-mod policy_tests;
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;

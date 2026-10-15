@@ -54,13 +54,9 @@ pub async fn emit_event_body(
     correlation: Correlation<'_>,
     body: shelllist_daemon_core::wire::EventBody,
 ) -> zbus::Result<()> {
-    let value = body
-        .envelope(api, stream, event, correlation)
-        .into_value()
-        .expect("event body is JSON");
-    emitter
-        .emit(interface, "Event", &(stream, value.to_string()))
-        .await
+    let message = serde_json::to_string(&body.envelope(api, stream, event, correlation))
+        .map_err(|error| zbus::Error::Failure(error.to_string()))?;
+    emitter.emit(interface, "Event", &(stream, message)).await
 }
 
 #[cfg(test)]

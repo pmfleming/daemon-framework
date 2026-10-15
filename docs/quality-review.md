@@ -1,5 +1,8 @@
 # Quality review and refactor
 
+Latest focused review: [RQLens refactor, 2026-10-15](reviews/rqlens-2026-10-15.md).
+The historical measurements below retain their original baselines.
+
 The measurements below predate the [native local-build migration](local-build.md).
 The build utility and its original 13 Python test scenarios now live in Rust and
 run through Cargo; historical measurements and validation commands are retained

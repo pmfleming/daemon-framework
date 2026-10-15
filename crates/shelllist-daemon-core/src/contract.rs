@@ -148,7 +148,10 @@ macro_rules! declare_methods {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ExecutionMode, MethodPolicy, Sensitivity, method_schemas};
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
     #[derive(Default, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub(crate) struct Params {

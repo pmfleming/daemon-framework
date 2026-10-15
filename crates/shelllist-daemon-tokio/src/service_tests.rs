@@ -1,4 +1,9 @@
-use super::*;
+use super::{Admitted, ServiceBoundary};
+use shelllist_daemon_core::ApiIdentity;
+use tokio::sync::Semaphore;
+
+#[path = "service_policy_tests.rs"]
+mod policy;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -14,39 +19,28 @@ fn code(response: &str) -> String {
         .into()
 }
 
-#[test]
-fn admission_limits_are_pre_dispatch_and_permits_are_released() {
+fn rejected(result: Result<Admitted, String>) -> String {
+    code(&result.err().expect("request must be rejected"))
+}
+
+#[tokio::test]
+async fn admission_limits_are_pre_dispatch_and_permits_are_released() {
     let boundary = ServiceBoundary::with_limits(API, 1, 1, 16, 128);
     assert_eq!(
-        code(&boundary.call(None, "test", "{}").err().unwrap()),
+        rejected(boundary.call(None, "test", "{}")),
         "owner-required"
     );
     assert_eq!(
-        code(
-            &boundary
-                .call(Some(":1.1"), "test", &"x".repeat(17))
-                .err()
-                .unwrap()
-        ),
+        rejected(boundary.call(Some(":1.1"), "test", &"x".repeat(17))),
         "request-too-large"
     );
     assert_eq!(
-        code(
-            &boundary
-                .subscribe(Some(":1.1"), &vec!["s".into(); 65])
-                .err()
-                .unwrap()
-        ),
+        rejected(boundary.subscribe(Some(":1.1"), &vec!["s".into(); 65])),
         "request-too-large"
     );
     let admitted = boundary.call(Some(":1.1"), "test", "{}").unwrap();
     assert_eq!(
-        code(
-            &boundary
-                .subscribe(Some(":1.2"), &["s".into()])
-                .err()
-                .unwrap()
-        ),
+        rejected(boundary.subscribe(Some(":1.2"), &["s".into()])),
         "rejected-before-dispatch"
     );
     let control = boundary.cancel(Some(":1.1"), "id").unwrap();
@@ -56,7 +50,15 @@ fn admission_limits_are_pre_dispatch_and_permits_are_released() {
         "outcome-unknown"
     );
     assert_eq!(code(&admitted.encoded("x".repeat(129))), "outcome-unknown");
-    drop((control, admitted));
+    drop(control);
+    assert_eq!(
+        code(
+            &admitted
+                .run::<Value, _>(async { panic!("undeclared work must not run") })
+                .await
+        ),
+        "rejected-before-dispatch"
+    );
     assert!(boundary.call(Some(":1.1"), "test", "{}").is_ok());
     assert!(boundary.cancel(Some(":1.1"), "id").is_ok());
 }

@@ -160,7 +160,8 @@ impl Failure {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Event, Gap};
+    use crate::{ApiError, ApiIdentity, Correlation};
     use serde_json::json;
     const API: ApiIdentity = ApiIdentity::new("test-api", crate::CONTRACT_VERSION);
     #[test]

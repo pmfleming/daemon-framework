@@ -1,8 +1,8 @@
-use super::*;
+use super::{API, ServiceBoundary, code, rejected};
 use serde_json::{Value, json};
-use shelllist_daemon_core::Sensitivity;
-
-const API: ApiIdentity = ApiIdentity::new("policy-test", 2);
+use shelllist_daemon_core::{ExecutionMode, MethodPolicy, Sensitivity};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 fn policy(mode: ExecutionMode) -> MethodPolicy {
     MethodPolicy {
         ack_budget_ms: 10,
@@ -12,12 +12,6 @@ fn policy(mode: ExecutionMode) -> MethodPolicy {
         max_owner_in_flight: 1,
         ..MethodPolicy::new(mode, Sensitivity::Effect, "test")
     }
-}
-fn code(response: &str) -> String {
-    serde_json::from_str::<Value>(response).unwrap()["error"]["code"]
-        .as_str()
-        .unwrap()
-        .into()
 }
 async fn drained(boundary: &ServiceBoundary) {
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -103,12 +97,7 @@ async fn policy_bytes_and_two_owner_quotas_apply_before_execution() {
     let boundary = ServiceBoundary::new(API);
     let policy = policy(ExecutionMode::Read);
     assert_eq!(
-        code(
-            &boundary
-                .call_policy(Some(":1.1"), "read", "123456789", policy)
-                .err()
-                .unwrap()
-        ),
+        rejected(boundary.call_policy(Some(":1.1"), "read", "123456789", policy)),
         "request-too-large"
     );
     let first = boundary

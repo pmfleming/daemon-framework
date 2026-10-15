@@ -29,11 +29,9 @@ impl<R: AsyncBufRead + Unpin> Frames<R> {
         loop {
             let available = self.reader.fill_buf().await?;
             if available.is_empty() {
-                return if self.oversized || !self.bytes.is_empty() {
-                    self.finish(false).map(Some)
-                } else {
-                    Ok(None)
-                };
+                return (self.oversized || !self.bytes.is_empty())
+                    .then(|| self.finish(false))
+                    .transpose();
             }
             let newline = available.iter().position(|byte| *byte == b'\n');
             let count = newline.unwrap_or(available.len());
