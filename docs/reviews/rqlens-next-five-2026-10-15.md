@@ -49,3 +49,18 @@ or wire formats change.
 
 Validation: formatting, strict workspace/all-target Clippy, `git diff --check`,
 and all 90 workspace tests pass (additional cases in the existing test).
+
+## 4. Normalize workspace-rule gaps at decoding
+
+Decode rule gaps into optional fixed-size logical insets, sharing the CSS
+shorthand parser with the global option. Each rule is normalized once rather
+than reparsed for each matching monitor; snapshots no longer retain each gap's
+JSON tree. The private deserializer intentionally maps invalid gap values to
+`None`, preserving fallback to an earlier valid rule or the global option.
+
+Additional cases cover null, booleans, objects, empty/malformed/oversized arrays,
+invalid strings and nonfinite text. Valid fallback and monitor isolation are
+checked for every case; existing shorthand and missing-field cases remain.
+
+Validation: formatting, strict workspace/all-target Clippy, `git diff --check`,
+and all 90 workspace tests pass (additional cases in the existing gap test).

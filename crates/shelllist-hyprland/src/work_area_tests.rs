@@ -40,6 +40,23 @@ fn logical_reservations_css_gaps_and_ordered_rules() {
     parts[2] = json!([{"workspaceString":"r[1-4]","gapsOut":[9,10,11,12]},{"workspaceString":"1","gapsOut":[3,4,5,6]},{"workspaceString":"1","borderSize":10},{"workspaceString":"1","gapsOut":"invalid"},{"workspaceString":"3","gapsOut":[7]}]);
     assert_margins(&parts, "eDP-1", [6.0, 54.0, 4.0, 5.0]);
     assert_margins(&parts, "DP-1", [31.0, 87.0, 17.0, 27.0]);
+    for invalid in [
+        Value::Null,
+        json!(false),
+        json!({"top": 1}),
+        json!([]),
+        json!([1, null]),
+        json!([1, 2, 3, 4, 5]),
+        json!("bad"),
+        json!("NaN"),
+    ] {
+        parts[2] = json!([
+            {"workspaceString":"1", "gapsOut":"3 4 5 6"},
+            {"workspaceString":"1", "gapsOut":invalid}
+        ]);
+        assert_margins(&parts, "eDP-1", [6.0, 54.0, 4.0, 5.0]);
+        assert_margins(&parts, "DP-1", [26.0, 82.0, 12.0, 22.0]);
+    }
     parts[2] = json!([]);
     parts[4]["css"] = json!("4 8 12 16");
     parts[0][0]["reserved"] = json!([7, 92, 13, 28]);

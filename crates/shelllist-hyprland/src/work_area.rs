@@ -72,8 +72,8 @@ struct Window {
 struct Rule {
     #[serde(rename = "workspaceString")]
     selector: String,
-    #[serde(rename = "gapsOut")]
-    gaps: Option<Value>,
+    #[serde(rename = "gapsOut", deserialize_with = "deserialize_gaps")]
+    gaps: Option<[f64; 4]>,
 }
 struct Snapshot {
     monitors: Vec<Monitor>,
@@ -89,6 +89,13 @@ fn css(value: &Value) -> Option<[f64; 4]> {
     } else {
         expand_css(value.as_array()?.iter().map(Value::as_f64))
     }
+}
+
+// Invalid rule gaps are ignored, not fatal; keep fallback to earlier valid rules.
+fn deserialize_gaps<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<[f64; 4]>, D::Error> {
+    Ok(css(&Value::deserialize(deserializer)?))
 }
 
 // CSS shorthand: top, right (or top), bottom (or top), left (or right).
@@ -366,7 +373,7 @@ fn insets(snapshot: &Snapshot) -> BTreeMap<String, Insets> {
                 .iter()
                 .rev()
                 .find_map(|rule| {
-                    let gaps = css(rule.gaps.as_ref()?)?;
+                    let gaps = rule.gaps?;
                     matches(&rule.selector, workspace, monitor, snapshot).then_some(gaps)
                 })
                 .unwrap_or(snapshot.gaps);
