@@ -1,4 +1,6 @@
-use super::{ReconnectingClient, execute_request, ordinary_call, with_transport_timeout};
+use super::{
+    ReconnectingClient, cancel_active, execute_request, ordinary_call, with_transport_timeout,
+};
 use crate::{
     dbus::JsonDbusClient, output_actor::test_support::Output, subscription::OwnedTaskRegistry,
     transport_tests::Bus,
@@ -158,6 +160,23 @@ async fn subscription_expiry_recovers_owner_even_when_server_creates_it_late() -
         2,
         "only test and service retain marker; late task was cleaned up"
     );
+    output.finish().await
+}
+
+#[tokio::test]
+async fn cleanup_deadline_includes_connection_acquisition() -> Result<()> {
+    let dbus = ReconnectingClient::new(ENDPOINT);
+    let output = Output::new();
+    // Hold the same mutex a stalled connection attempt would hold. No bus is
+    // needed, and cleanup cannot acquire a connection until the guard drops.
+    let held = dbus.current.lock().await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        cancel_active(&dbus, &output.handle, Duration::from_millis(10)),
+    )
+    .await?;
+    assert!(held.is_none());
+    drop(held);
     output.finish().await
 }
 

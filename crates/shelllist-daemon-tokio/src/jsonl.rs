@@ -144,7 +144,7 @@ pub async fn run_jsonl_client_with_input_limit<P: CorrelationPolicy>(
     )
     .await?;
     drain_calls(&mut calls, config.shutdown_timeout).await;
-    cancel_active(&dbus, &output).await;
+    cancel_active(&dbus, &output, CONTROL_TIMEOUT).await;
 
     drop((event_task, owner_task));
     if let Some(id) = shutdown_id {
@@ -506,12 +506,18 @@ async fn drain_all(calls: &mut JoinSet<()>) {
     }
 }
 
-async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle) {
-    let Ok(client) = dbus.get().await else {
-        return;
+// One budget covers connection acquisition, the ID query and all cancellations.
+async fn cancel_active(dbus: &ReconnectingClient, output: &OutputHandle, timeout: Duration) {
+    let cleanup = async {
+        let Ok(client) = dbus.get().await else {
+            return;
+        };
+        for id in output.active_ids().await {
+            let _ = client.cancel_json(&id).await;
+        }
     };
-    for id in output.active_ids().await {
-        let _ = client.cancel_json(&id).await;
+    if tokio::time::timeout(timeout, cleanup).await.is_err() {
+        tracing::warn!("daemon cancellation cleanup timed out");
     }
 }
 

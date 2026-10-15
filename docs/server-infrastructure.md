@@ -138,6 +138,12 @@ allocates only the selected ID. Acceptance checks, event paths and terminal name
 remain daemon policy. Existing custom `response_id` implementations still work;
 `BasicCorrelation` uses the subscription-only defaults.
 
+JSONL shutdown first drains accepted requests (optionally bounded by
+`shutdown_timeout`). Best-effort tracked-ID cancellation then has a separate,
+shared five-second budget covering connection acquisition, the ID query and all
+cancellation replies. Expiry logs a warning rather than hanging cleanup or
+replaying requests; server-owned resources remain subject to owner-loss cleanup.
+
 ## Validation and deployment
 
 Framework tests include independent private buses with identical unique names,
