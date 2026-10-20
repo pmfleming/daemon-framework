@@ -12,6 +12,12 @@ Shared Rust infrastructure for Shelllist's five domain daemons: `app-daemon`, `b
 | `shelllist-local-build` | Native snapshot/build CLI and source-policy tests; not a daemon dependency |
 
 `shelllist-protocol-js` is a binary in **shelllist-daemon-core**, not a separate crate. It generates frontend constants from daemon-owned registries.
+Default output remains standalone. To share validation across generated clients,
+emit `shelllist-protocol-js --runtime` once and export it as `ProtocolValidation 1.0`
+in a QML module's `qmldir`. Generate clients with `--runtime-module Module.Uri`;
+their existing `schemaError`, `eventError`, `requestError` and `responseError` APIs
+forward to that module. URI imports work through both source and packaged module
+paths. Generate/check the runtime and clients together; never hand-edit outputs.
 
 Domain schemas, validation, persistence policy and effects stay in their owning daemons; fuzzy ranking and UI policy stay in Shelllist. Hyprland does not become a core/Tokio dependency: app/bar consume its crate directly, bar owns shared cache/subscriber lifetimes, and Shelllist owns placement/animation. See [Hyprland APIs](crates/shelllist-hyprland/README.md) and [server lifecycle guarantees](docs/server-infrastructure.md).
 

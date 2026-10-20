@@ -62,16 +62,16 @@ function schemaError(schema, value, root, path) {
     return "";
 }
 
-function eventError(envelope) {
+function validateEvent(eventContracts, envelope) {
     var schema = eventContracts[envelope.stream + ":" + envelope.event];
     return schema ? schemaError(schema, envelope.data) : "";
 }
 
-function requestError(method, params) {
+function validateRequest(contracts, method, params) {
     var contract = contracts[method];
     return contract ? schemaError(contract.params_schema, params) : "";
 }
-function responseError(method, envelope) {
+function validateResponse(contracts, method, envelope) {
     var contract = contracts[method];
     if (!contract || !envelope || envelope.ok !== true) return "";
     if (!envelope.data || !Object.prototype.hasOwnProperty.call(envelope.data, contract.response_key)) return "Missing " + contract.response_key + " result";
