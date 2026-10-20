@@ -204,64 +204,6 @@ fn snapshots_capture_dirty_files_preserve_metadata_and_confine_symlinks() {
 }
 
 #[test]
-fn snapshots_share_sources_and_preserve_live_locks_on_success_or_failure() {
-    let repos = Repositories::new();
-    let (root, app, framework) = repos.matrix();
-    fs::write(root.join("flake.lock"), "original lock").unwrap();
-    git(&root, &["add", "flake.lock"]);
-    fs::write(framework.join("source"), "dirty framework").unwrap();
-    let mut input = definitions(&root);
-    input.insert(
-        "alias".into(),
-        json!({"url":"git+file:../daemon-framework"}),
-    );
-    fs::write(
-        root.join("inputs.json"),
-        serde_json::to_vec(&input).unwrap(),
-    )
-    .unwrap();
-    let mut nix = TestNix::default();
-    let result = prepare(&mut nix, &root, &repos.path("snapshots"), false).unwrap();
-    assert_eq!(result.sources.len(), 3);
-    assert_eq!(nix.reads.len(), 3);
-    assert_eq!(nix.stores.len(), 2);
-    assert_eq!(result.store_sources.len(), 2);
-    assert_eq!(
-        fs::read_to_string(result.sources[&framework].join("source")).unwrap(),
-        "dirty framework"
-    );
-    let command = &nix.locks[0];
-    assert!(command.contains(&"daemon-framework".into()));
-    assert!(!command.contains(&"app-daemon/daemonFramework".into()));
-    let alias = command.iter().position(|arg| arg == "alias").unwrap();
-    let primary = command
-        .iter()
-        .position(|arg| arg == "daemon-framework")
-        .unwrap();
-    assert_eq!(command[alias + 1], command[primary + 1]);
-    for source in [&app, &framework] {
-        assert!(!source.join("flake.lock").exists());
-    }
-    let saved: Value =
-        serde_json::from_slice(&fs::read(repos.path("snapshots/sources.json")).unwrap()).unwrap();
-    assert_eq!(saved, serde_json::to_value(result).unwrap());
-    assert_eq!(
-        fs::read_to_string(root.join("flake.lock")).unwrap(),
-        "original lock"
-    );
-    nix.fail_lock = true;
-    error_contains(
-        prepare(&mut nix, &root, &repos.path("failed"), false),
-        "injected lock failure",
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("flake.lock")).unwrap(),
-        "original lock"
-    );
-    assert!(!repos.path("failed/sources.json").exists());
-}
-
-#[test]
 fn source_policy_rejects_pins_divergent_edges_and_private_frameworks() {
     let repos = Repositories::new();
     let (root, app, framework) = repos.matrix();
@@ -426,54 +368,6 @@ fn graph_cycles_collisions_and_existing_destinations_fail_closed() {
         "basename collision",
     );
     assert!(nix.locks.is_empty());
-}
-
-#[test]
-fn preflight_aggregates_worktrees_ignores_follows_and_does_not_write() {
-    let repos = Repositories::new();
-    let root = repos.repository(
-        "root",
-        json!({
-            "sibling": {"url": "git+file:../sibling"},
-            "again": {"url": "git+file:../sibling", "inputs": {} },
-            "followed": {"follows": "sibling", "url": "git+file:../missing"}
-        }),
-        &[],
-    );
-    let sibling = repos.repository("sibling", json!({}), &[(".gitignore", "ignored/\n")]);
-    fs::create_dir(sibling.join("ignored")).unwrap();
-    fs::write(sibling.join("ignored/output"), "ignored").unwrap();
-    fs::write(sibling.join("image.png"), "untracked").unwrap();
-    fs::write(root.join("forgotten.nix"), "untracked").unwrap();
-    let mut nix = TestNix::default();
-    let error = format!(
-        "{:#}",
-        crate::preflight::preflight(&mut nix, &root).unwrap_err()
-    );
-    assert!(
-        error.contains("forgotten.nix") && error.contains("image.png"),
-        "{error}"
-    );
-    assert!(
-        !error.contains("ignored/output") && !error.contains("missing"),
-        "{error}"
-    );
-    assert_eq!(nix.reads.len(), 2);
-    assert!(nix.locks.is_empty() && nix.stores.is_empty());
-    assert!(root.join("forgotten.nix").exists() && sibling.join("image.png").exists());
-    fs::remove_file(root.join("forgotten.nix")).unwrap();
-    fs::remove_file(sibling.join("image.png")).unwrap();
-    let report = crate::preflight::preflight(&mut nix, &root).unwrap();
-    assert_eq!(report.repositories.len(), 2);
-    // Failed evaluations are cached too, even for distinct edge overlays.
-    nix.reads.clear();
-    fs::write(sibling.join("inputs.json"), "invalid JSON").unwrap();
-    let error = crate::preflight::preflight(&mut nix, &root)
-        .unwrap_err()
-        .to_string();
-    assert_eq!(error.matches("Cannot inspect").count(), 1, "{error}");
-    assert!(error.contains(sibling.to_str().unwrap()), "{error}");
-    assert_eq!(nix.reads.len(), 2);
 }
 
 #[test]

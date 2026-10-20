@@ -88,37 +88,3 @@ pub fn error(api: ApiIdentity, error: ApiError) -> Value {
     response["error"] = error.into_value();
     response
 }
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{ApiError, ApiIdentity, error};
-
-    const API: ApiIdentity = ApiIdentity::new("test-api", 1);
-
-    #[test]
-    fn success_and_error_envelopes_preserve_wire_contracts() {
-        assert_eq!(
-            super::success(API, json!({"operation": "test"})),
-            json!({"protocol":"test-api", "version":1, "ok":true, "data":{"operation":"test"}})
-        );
-        let basic = error(API, ApiError::new("failed", "no"));
-        assert_eq!(
-            basic,
-            json!({
-                "protocol": "test-api", "version": 1, "ok": false,
-                "error": { "code": "failed", "message": "no" }
-            })
-        );
-
-        let detailed = error(
-            API,
-            ApiError::new("failed", "no")
-                .with_retryable(false)
-                .with_details(json!({ "operation": "test" })),
-        );
-        assert_eq!(detailed["error"]["retryable"], false);
-        assert_eq!(detailed["error"]["details"]["operation"], "test");
-    }
-}

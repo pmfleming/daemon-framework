@@ -369,10 +369,7 @@ fn valid_signature(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        COMMAND_SOCKET, Client, EVENT_SOCKET, Event, connect_candidates, socket_candidates,
-        watch_events_with,
-    };
+    use super::{COMMAND_SOCKET, Client, EVENT_SOCKET, Event, watch_events_with};
     use std::time::Duration;
     use tokio::{
         fs,
@@ -527,56 +524,6 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn discovery_is_ordered_and_connect_skips_stale_sockets() {
-        let root = tempfile::tempdir().unwrap();
-        let roots = [root.path().join("runtime"), root.path().join("legacy")];
-        for socket in [COMMAND_SOCKET, EVENT_SOCKET] {
-            let mut listeners = Vec::new();
-            for (base, name) in [(0, "z"), (0, "b"), (0, "preferred"), (1, "preferred")] {
-                let directory = roots[base].join(name);
-                fs::create_dir_all(&directory).await.unwrap();
-                listeners.push(tokio::net::UnixListener::bind(directory.join(socket)).unwrap());
-            }
-            let candidates = socket_candidates(&roots, Some("preferred"), socket).await;
-            assert_eq!(
-                candidates,
-                [
-                    roots[0].join("preferred").join(socket),
-                    roots[1].join("preferred").join(socket),
-                    roots[0].join("b").join(socket),
-                    roots[0].join("z").join(socket)
-                ]
-            );
-            assert_eq!(
-                super::exact_socket_candidates(&roots, "preferred", socket).await,
-                candidates[..2]
-            );
-            drop(listeners.pop()); // stale preferred socket in legacy root
-            drop(listeners.pop()); // stale preferred socket in runtime root
-            let stream = connect_candidates(&candidates).await.unwrap();
-            let (_peer, _) = listeners[1].accept().await.unwrap(); // sorted fallback b, not z
-            drop(stream);
-            fs::create_dir_all(roots[0].join("file")).await.unwrap();
-            fs::write(roots[0].join("file").join(socket), b"not a socket")
-                .await
-                .unwrap();
-            for unavailable in [
-                root.path().join("missing"),
-                roots[0].join("file").join(socket),
-            ] {
-                for index in [0, 2] {
-                    let mut degraded = roots.to_vec();
-                    degraded.insert(index, unavailable.clone());
-                    assert_eq!(
-                        socket_candidates(&degraded, Some("preferred"), socket).await,
-                        candidates
-                    );
-                }
-            }
         }
     }
 

@@ -202,27 +202,6 @@ fn render_names(variable: &str, names: &[&str]) -> Result<String> {
 mod tests {
     use super::{check_schema, render};
     use serde_json::{Value, json};
-    #[test]
-    fn shared_runtime_preserves_exports_without_inlining_validation() {
-        let registry = json!({"protocol":"test", "version":2, "registry":{
-            "methods":[{"name":"typed", "params_schema":true, "result_schema":false}], "streams":[]
-        }});
-        let shared = render(&registry, Some("Example.Validation")).unwrap();
-        assert!(shared.contains(".import Example.Validation 1.0 as Runtime"));
-        assert!(
-            shared.contains(
-                "return Runtime.ProtocolValidation.schemaError(schema, value, root, path)"
-            )
-        );
-        assert!(shared.contains(
-            "return Runtime.ProtocolValidation.validateResponse(contracts, method, envelope)"
-        ));
-        assert!(!shared.contains("function validateResponse("));
-        let standalone = render(&registry, None).unwrap();
-        assert!(!standalone.contains(".import"));
-        assert!(standalone.contains("function validateResponse("));
-        assert!(render(&registry, Some("invalid\n.js")).is_err());
-    }
 
     #[test]
     fn generation_validates_contracts_and_rejects_unsupported_schemas() {

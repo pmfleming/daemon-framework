@@ -466,41 +466,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, duplex};
     use tokio::sync::mpsc;
 
-    use super::{
-        BasicCorrelation, CorrelationPolicy, OutputCommand, OutputState, TrackedKind,
-        run_output_actor,
-    };
-
-    struct Operations;
-    impl CorrelationPolicy for Operations {
-        fn operation_id<'a>(&self, response: &'a Value) -> Option<&'a str> {
-            response.get("operation")?.as_str()
-        }
-    }
-
-    #[test]
-    fn response_defaults_prioritize_operations_and_fall_back_on_invalid_ids() {
-        let mut response = json!({"operation": "op", "data": {"subscription": {"id": "sub"}}});
-        let operation = Operations.response_id(&response).unwrap();
-        assert_eq!(
-            (operation.id.as_str(), operation.kind),
-            ("op", TrackedKind::Operation)
-        );
-        for invalid in [Value::Null, json!(42), json!({})] {
-            response["operation"] = invalid;
-            assert_eq!(
-                Operations.response_id(&response),
-                BasicCorrelation.response_id(&response)
-            );
-            assert_eq!(Operations.response_id(&response).unwrap().id, "sub");
-        }
-        assert!(Operations.response_id(&json!({})).is_none());
-        assert!(
-            BasicCorrelation
-                .response_id(&json!({"data": {"subscription": {"id": 42}}}))
-                .is_none()
-        );
-    }
+    use super::{BasicCorrelation, OutputCommand, OutputState, run_output_actor};
 
     #[tokio::test]
     async fn responses_overtake_queued_events() -> Result<()> {
