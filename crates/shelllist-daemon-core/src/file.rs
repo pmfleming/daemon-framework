@@ -1,7 +1,7 @@
 //! Atomic single-file persistence. Multi-file transactions and recovery are caller policy.
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, BufWriter, Read, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -46,8 +46,21 @@ pub struct StagedFile {
 
 impl StagedFile {
     pub fn new(path: &Path, contents: &[u8], policy: AtomicFilePolicy) -> io::Result<Self> {
+        Self::with_writer(path, policy, |output| output.write_all(contents))
+    }
+
+    /// Stream into an owned temporary file. The callback, buffer flush and file
+    /// sync must all succeed before the staged file can be committed. On error
+    /// only our temporary file is removed; the destination is not replaced.
+    pub fn with_writer<E: From<io::Error>>(
+        path: &Path,
+        policy: AtomicFilePolicy,
+        write: impl FnOnce(&mut dyn Write) -> Result<(), E>,
+    ) -> Result<Self, E> {
         let parent = parent_directory(path)?;
-        let name = path.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
         create_directory(parent, policy)?;
         if policy.reject_symlink_destination {
             reject_symlink(path)?;
@@ -58,7 +71,7 @@ impl StagedFile {
             temporary: Some(temporary),
             policy,
         };
-        output.write_all(contents)?;
+        write_buffered(&mut output, write)?;
         if let Some(mode) = policy.file_mode {
             output.set_permissions(fs::Permissions::from_mode(mode))?;
         }
@@ -85,6 +98,17 @@ impl Drop for StagedFile {
             let _ = fs::remove_file(path);
         }
     }
+}
+
+fn write_buffered<E: From<io::Error>>(
+    output: &mut dyn Write,
+    write: impl FnOnce(&mut dyn Write) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut buffered = BufWriter::new(output);
+    write(&mut buffered)?;
+    // Drop ignores flush failures; never rely on it for persistence.
+    buffered.flush()?;
+    Ok(())
 }
 
 fn create_temporary(
@@ -268,6 +292,42 @@ pub(crate) mod tests {
             parent_directory(Path::new("relative.json")).unwrap(),
             Path::new(".")
         );
+    }
+
+    #[test]
+    fn streaming_errors_never_publish_and_flush_errors_are_reported() {
+        use std::io::{self, Write};
+        let root = Directory::new();
+        let path = root.0.join("state");
+        fs::write(&path, b"old").unwrap();
+        let result = StagedFile::with_writer(&path, AtomicFilePolicy::PRIVATE, |out| {
+            out.write_all(&vec![b'x'; 32_000])?;
+            Err::<(), _>(io::Error::other("injected producer failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+
+        struct FailingWriter(bool);
+        impl Write for FailingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 {
+                    Err(io::Error::other("write failed"))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+        for fail_write in [false, true] {
+            assert!(
+                super::write_buffered(&mut FailingWriter(fail_write), |out| out
+                    .write_all(b"buffered"))
+                .is_err()
+            );
+        }
     }
 
     #[test]

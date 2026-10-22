@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::file::{AtomicFilePolicy, write_bytes_atomic};
+use crate::file::{AtomicFilePolicy, StagedFile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XdgRoot {
@@ -130,14 +130,8 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
     value: &T,
     policy: AtomicWritePolicy,
 ) -> Result<(), StateError> {
-    let bytes = if policy.pretty {
-        serde_json::to_vec_pretty(value)?
-    } else {
-        serde_json::to_vec(value)?
-    };
-    write_bytes_atomic(
+    StagedFile::with_writer::<StateError>(
         path,
-        &bytes,
         AtomicFilePolicy {
             directory_mode: Some(policy.directory_mode),
             file_mode: Some(policy.file_mode),
@@ -145,7 +139,16 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
             sync_new_ancestors: policy.sync_parent,
             ..AtomicFilePolicy::PRIVATE
         },
-    )?;
+        |output| {
+            if policy.pretty {
+                serde_json::to_writer_pretty(output, value)?;
+            } else {
+                serde_json::to_writer(output, value)?;
+            }
+            Ok(())
+        },
+    )?
+    .commit()?;
     Ok(())
 }
 
@@ -153,6 +156,48 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
 mod tests {
     use super::{is_safe_relative_path, is_single_normal_component};
     use std::path::Path;
+
+    #[test]
+    fn streamed_json_matches_encoding_and_serializer_failure_preserves_state() {
+        use super::*;
+        let root = crate::file::tests::Directory::new();
+        let path = root.0.join("state.json");
+        let value = serde_json::json!({"large": "x".repeat(32_000), "unicode": "λ"});
+        for pretty in [false, true] {
+            write_json_atomic(
+                &path,
+                &value,
+                AtomicWritePolicy {
+                    pretty,
+                    ..AtomicWritePolicy::PRIVATE
+                },
+            )
+            .unwrap();
+            let expected = if pretty {
+                serde_json::to_vec_pretty(&value)
+            } else {
+                serde_json::to_vec(&value)
+            }
+            .unwrap();
+            assert_eq!(fs::read(&path).unwrap(), expected);
+        }
+        struct Failed;
+        impl Serialize for Failed {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let mut sequence = serializer.serialize_seq(Some(2))?;
+                sequence.serialize_element(&"x".repeat(32_000))?;
+                Err(serde::ser::Error::custom("injected failure"))
+            }
+        }
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            write_json_atomic(&path, &Failed, AtomicWritePolicy::PRIVATE),
+            Err(StateError::Json(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+    }
 
     #[test]
     fn xdg_suffixes_cannot_escape_the_application_directory() {
