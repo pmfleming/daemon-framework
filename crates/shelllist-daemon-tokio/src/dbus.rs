@@ -4,6 +4,10 @@ use zbus::{message::Header, object_server::SignalEmitter};
 
 use shelllist_daemon_core::DaemonEndpoint;
 
+#[cfg(test)]
+#[path = "dbus_tests.rs"]
+mod tests;
+
 #[derive(Clone)]
 pub struct JsonDbusClient {
     connection: zbus::Connection,
