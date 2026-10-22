@@ -126,7 +126,7 @@ mod tests {
         assert!(bounded_watch_paths([(root.clone(), true)], 2).is_err());
         assert_eq!(
             bounded_watch_paths([(root.clone(), false)], 1).unwrap(),
-            [root.clone()]
+            std::slice::from_ref(&root)
         );
         assert!(bounded_watch_paths([(root, false)], 0).is_err());
     }
