@@ -3,19 +3,19 @@ use std::io;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Frame {
+pub(crate) enum Frame {
     Line(String),
     TooLarge,
 }
 
-pub(super) struct Frames<R> {
+pub(crate) struct Frames<R> {
     reader: R,
     bytes: Vec<u8>,
     maximum: usize,
     oversized: bool,
 }
 impl<R: AsyncBufRead + Unpin> Frames<R> {
-    pub(super) fn new(reader: R, maximum: usize) -> Self {
+    pub(crate) fn new(reader: R, maximum: usize) -> Self {
         assert!(maximum < usize::MAX);
         Self {
             reader,
@@ -25,7 +25,7 @@ impl<R: AsyncBufRead + Unpin> Frames<R> {
         }
     }
 
-    pub(super) async fn next(&mut self) -> io::Result<Option<Frame>> {
+    pub(crate) async fn next(&mut self) -> io::Result<Option<Frame>> {
         loop {
             let available = self.reader.fill_buf().await?;
             if available.is_empty() {

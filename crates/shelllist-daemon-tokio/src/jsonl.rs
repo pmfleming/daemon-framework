@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 #[path = "jsonl_input.rs"]
-mod input;
+pub(crate) mod input;
 use input::{Frame, Frames};
 
 use crate::{
@@ -32,20 +32,20 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_CAPACITY: usize = 16;
 
-struct RequestSlots {
+pub(crate) struct RequestSlots {
     calls: Arc<Semaphore>,
     controls: Arc<Semaphore>,
 }
 
 impl RequestSlots {
-    fn new(maximum_calls: usize) -> Self {
+    pub(crate) fn new(maximum_calls: usize) -> Self {
         Self {
             calls: Arc::new(Semaphore::new(maximum_calls)),
             controls: Arc::new(Semaphore::new(CONTROL_CAPACITY)),
         }
     }
 
-    fn acquire(
+    pub(crate) fn acquire(
         &self,
         request: &ClientRequest,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::TryAcquireError> {
@@ -190,7 +190,10 @@ async fn request_loop(
     Ok(None)
 }
 
-async fn parse_request(line: &str, output: &OutputHandle) -> Result<Option<ClientMessage>> {
+pub(crate) async fn parse_request(
+    line: &str,
+    output: &OutputHandle,
+) -> Result<Option<ClientMessage>> {
     if line.trim().is_empty() {
         return Ok(None);
     }
@@ -375,7 +378,7 @@ async fn with_transport_timeout<T>(
     }
 }
 
-fn response_command(
+pub(crate) fn response_command(
     id: String,
     result: Result<Value>,
     cancelled_request_id: Option<String>,
@@ -389,7 +392,7 @@ fn response_command(
     }
 }
 
-fn cancellation_succeeded(response: &Value) -> bool {
+pub(crate) fn cancellation_succeeded(response: &Value) -> bool {
     response.get("ok").and_then(Value::as_bool) != Some(false)
 }
 

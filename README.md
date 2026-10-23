@@ -61,6 +61,13 @@ Pipe a daemon registry JSON document into:
 tools/local-build run --attr protocolBindings .
 ```
 
+## Direct Unix JSONL ingress
+
+The staged [`JsonlListener` API](docs/unix-jsonl.md) supports same-UID direct sockets
+using the existing routed protocol and domain admission. This is an additive
+framework foundation; consumers and Quickshell acceptance are separate rollout
+gates. D-Bus and the bridge remain supported.
+
 ## Routed JSONL clients
 
 Calls, subscriptions and cancellations accept optional bridge-local metadata:
