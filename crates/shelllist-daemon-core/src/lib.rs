@@ -1,9 +1,11 @@
 //! Runtime-independent infrastructure shared by Shelllist daemons.
 
 mod contract;
+mod decimal;
 pub use contract::{
     CONTRACT_VERSION, ExecutionMode, MethodPolicy, Sensitivity, StreamSemantics, method_schemas,
 };
+pub use decimal::fixed_decimal;
 mod endpoint;
 mod envelope;
 mod file;
