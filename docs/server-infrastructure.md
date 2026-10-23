@@ -108,6 +108,27 @@ context local. Its D-Bus ingress now has separate request (64 queued / 8 running
 and control (16 queued / 2 running) lanes. Cancellation does not compete for ordinary
 ingress capacity, and direct D-Bus clients cannot bypass that ingress bound.
 
+## Response encoding and executor responsiveness
+
+`ServiceBoundary` admitted `run` requests await domain work on the async runtime,
+then serialize the result in a blocking job. Large replies cannot monopolize an
+executor thread needed by input, timers, cancellation or subscriptions. Domain
+handlers must still isolate their own blocking I/O and CPU-heavy projections;
+this does not move the entire handler, event forwarding or direct `encode` calls.
+
+The encoder owns the original admission permit and owner/method quota until it
+actually finishes. A deadline or lost read waiter may stop waiting, but cannot
+abort synchronous encoding or free that capacity early. Effect execution retains
+its existing lifetime. Byte limits and outcome-unknown/no-replay behavior remain
+in force, including encoder failure. No unbounded per-reply tasks are admitted:
+accepted request capacity also bounds encoders. Small replies incur a worker
+handoff; this is executor isolation, not a claim of lower serialization CPU or a
+hard latency guarantee under saturation.
+
+The single-thread runtime regression gates a real serializer while checking that
+a second admitted request and the cleanup lane remain available, and that both
+read/effect deadlines retain quotas until encoding completes.
+
 ## Operations and forwarding
 
 `OwnedOperations<T>` supplies owner-scoped admission and single-winner terminal

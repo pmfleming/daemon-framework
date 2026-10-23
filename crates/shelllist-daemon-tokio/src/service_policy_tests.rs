@@ -108,6 +108,66 @@ async fn read_timeout_and_panicking_handler_release_all_accounting() {
     drained(&boundary).await;
 }
 
+// A gated serializer makes executor responsiveness deterministic, without a
+// throughput threshold or sleeps standing in for real admitted work.
+struct GatedEncoding {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+impl serde::Serialize for GatedEncoding {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let _ = self.entered.lock().unwrap().take().unwrap().send(());
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(serde::ser::Error::custom)?;
+        serializer.serialize_bool(true)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn encoding_keeps_executor_responsive_and_capacity_until_actual_completion() {
+    for mode in [ExecutionMode::Read, ExecutionMode::Effect] {
+        let boundary = ServiceBoundary::with_limits(API, 2, 1, 1024, 1024);
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let admitted = boundary
+            .call_policy(Some(":1.1"), "read", "{}", policy(mode))
+            .unwrap();
+        let slow = tokio::spawn(admitted.run(async move {
+            GatedEncoding {
+                entered: std::sync::Mutex::new(Some(entered)),
+                release: std::sync::Mutex::new(wait),
+            }
+        }));
+        within_seconds(2, started).await.unwrap();
+        assert_eq!(
+            code(&within_seconds(2, slow).await.unwrap()),
+            "outcome-unknown"
+        );
+        assert!(
+            boundary
+                .call_policy(Some(":1.1"), "read", "{}", policy(mode))
+                .is_err(),
+            "timeout must not release a still-running encoder's quota"
+        );
+        assert!(boundary.cancel(Some(":1.1"), "operation").is_ok());
+        let mut fast_policy = policy(ExecutionMode::Read);
+        fast_policy.ack_budget_ms = 1000;
+        let fast = boundary
+            .call_policy(Some(":1.2"), "read", "{}", fast_policy)
+            .unwrap();
+        assert_eq!(
+            within_seconds(2, fast.run(async { true })).await,
+            "true",
+            "a second request must complete while the first encoder is gated"
+        );
+        release.send(()).unwrap();
+        drained(&boundary).await;
+    }
+}
+
 #[tokio::test]
 async fn policy_bytes_and_two_owner_quotas_apply_before_execution() {
     let boundary = ServiceBoundary::new(API);

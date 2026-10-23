@@ -208,7 +208,16 @@ impl Admitted {
             );
         };
         let api = self.api;
-        let mut task = tokio::spawn(async move { self.encode(&work.await) });
+        let mut task = tokio::spawn(async move {
+            let value = work.await;
+            // Serialization can be megabytes of synchronous work. Keep it off
+            // executor threads servicing input, cancellation and subscriptions.
+            // Move admission with the job: timeout/waiter loss cannot release
+            // capacity while a non-cancellable encoder is still running.
+            tokio::task::spawn_blocking(move || self.encode(&value))
+                .await
+                .unwrap_or_else(|_| reject(api, "outcome-unknown", "Result encoding failed; execution may have completed; do not replay mutations"))
+        });
         let _cancel =
             (policy.execution == ExecutionMode::Read).then(|| AbortOnDrop(task.abort_handle()));
         match tokio::time::timeout(
