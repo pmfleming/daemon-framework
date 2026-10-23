@@ -1,6 +1,7 @@
 # Quality review and refactor
 
-Latest focused reviews: [RQLens refactor](reviews/rqlens-2026-10-15.md) and
+Latest focused review: [RQLens refactor, 2026-10-23](reviews/rqlens-2026-10-23.md).
+Previous reviews: [RQLens refactor](reviews/rqlens-2026-10-15.md) and
 [next five improvements](reviews/rqlens-next-five-2026-10-15.md), 2026-10-15.
 The historical measurements below retain their original baselines.
 

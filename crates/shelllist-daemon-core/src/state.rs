@@ -159,7 +159,9 @@ mod tests {
 
     #[test]
     fn streamed_json_matches_encoding_and_serializer_failure_preserves_state() {
-        use super::*;
+        use super::{AtomicWritePolicy, StateError, write_json_atomic};
+        use serde::Serialize;
+        use std::fs;
         let root = crate::file::tests::Directory::new();
         let path = root.0.join("state.json");
         let value = serde_json::json!({"large": "x".repeat(32_000), "unicode": "λ"});

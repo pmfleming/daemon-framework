@@ -1,7 +1,8 @@
 use super::{API, ServiceBoundary, code, rejected};
+use crate::transport_tests::within_seconds;
 use serde_json::{Value, json};
 use shelllist_daemon_core::{ExecutionMode, MethodPolicy, Sensitivity};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 fn policy(mode: ExecutionMode) -> MethodPolicy {
     MethodPolicy {
@@ -14,7 +15,7 @@ fn policy(mode: ExecutionMode) -> MethodPolicy {
     }
 }
 async fn drained(boundary: &ServiceBoundary) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    within_seconds(2, async {
         loop {
             // Probe restored method and owner capacity instead of inspecting
             // the representation of the boundary's accounting maps.
@@ -30,8 +31,7 @@ async fn drained(boundary: &ServiceBoundary) {
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .unwrap();
+    .await;
 }
 
 #[tokio::test]

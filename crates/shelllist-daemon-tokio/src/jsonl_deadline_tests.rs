@@ -5,7 +5,7 @@ use crate::{
     dbus::JsonDbusClient,
     output_actor::{OutputCommand, test_support::Output},
     subscription::OwnedTaskRegistry,
-    transport_tests::Bus,
+    transport_tests::{Bus, within_seconds},
 };
 use anyhow::Result;
 use serde_json::json;
@@ -163,11 +163,11 @@ async fn call_and_cancel_deadlines_preserve_outcomes_ownership_and_no_replay() -
         assert_eq!(active, retained);
     }
     // A real stalled Cancel reply must not hang shutdown or be replayed.
-    tokio::time::timeout(
-        Duration::from_secs(2),
+    within_seconds(
+        2,
         cancel_active(&dbus, &output.handle, Duration::from_secs(1)),
     )
-    .await?;
+    .await;
     assert_eq!(effects.load(Ordering::SeqCst), 2);
     output.finish().await
 }
@@ -221,10 +221,6 @@ async fn subscription_readiness_and_late_expiry_preserve_owner_cleanup() -> Resu
     // The frontend closes the bridge owner on transport error. Even a server
     // subscription created after that close must release its owned worker.
     connection.close().await?;
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), released)
-            .await?
-            .is_err()
-    );
+    assert!(within_seconds(2, released).await.is_err());
     output.finish().await
 }

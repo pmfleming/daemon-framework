@@ -54,12 +54,7 @@ fn render(value: &Value, runtime_import: Option<&str>) -> Result<String> {
     let has_validation = !contracts.is_empty() || !events.is_empty();
     let mut output = String::from(".pragma library\n");
     if let Some(path) = runtime_import.filter(|_| has_validation) {
-        if !path.split('.').all(|part| {
-            !part.is_empty()
-                && part.chars().enumerate().all(|(index, c)| {
-                    c.is_ascii_alphabetic() || c == '_' || (index > 0 && c.is_ascii_digit())
-                })
-        }) {
+        if !path.split('.').all(qml_identifier) {
             return Err("runtime module must be a QML module URI".into());
         }
         output.push_str(&format!(".import {path} 1.0 as Runtime\n"));
@@ -70,27 +65,34 @@ fn render(value: &Value, runtime_import: Option<&str>) -> Result<String> {
         render_names("methods", &methods)?,
         render_names("streams", &streams)?,
     ));
-    if has_validation {
-        output.push_str(&format!(
-            "\nvar contracts = {};\nvar eventContracts = {};\n",
-            serde_json::to_string(&contracts)?,
-            serde_json::to_string(&events)?
-        ));
-        if runtime_import.is_none() {
-            output.push_str(VALIDATION);
-        } else {
-            output.push_str("function schemaError(schema, value, root, path) {\n    return Runtime.ProtocolValidation.schemaError(schema, value, root, path);\n}\n");
-        }
-        let prefix = if runtime_import.is_some() {
-            "Runtime.ProtocolValidation."
-        } else {
-            ""
-        };
-        output.push_str(&format!(
-            "\nfunction eventError(envelope) {{\n    return {prefix}validateEvent(eventContracts, envelope);\n}}\n\nfunction requestError(method, params) {{\n    return {prefix}validateRequest(contracts, method, params);\n}}\n\nfunction responseError(method, envelope) {{\n    return {prefix}validateResponse(contracts, method, envelope);\n}}\n"
-        ));
+    if !has_validation {
+        return Ok(output);
     }
+    output.push_str(&format!(
+        "\nvar contracts = {};\nvar eventContracts = {};\n",
+        serde_json::to_string(&contracts)?,
+        serde_json::to_string(&events)?
+    ));
+    let (validation, prefix) = match runtime_import {
+        None => (VALIDATION, ""),
+        Some(_) => (
+            "function schemaError(schema, value, root, path) {\n    return Runtime.ProtocolValidation.schemaError(schema, value, root, path);\n}\n",
+            "Runtime.ProtocolValidation.",
+        ),
+    };
+    output.push_str(validation);
+    output.push_str(&format!(
+        "\nfunction eventError(envelope) {{\n    return {prefix}validateEvent(eventContracts, envelope);\n}}\n\nfunction requestError(method, params) {{\n    return {prefix}validateRequest(contracts, method, params);\n}}\n\nfunction responseError(method, envelope) {{\n    return {prefix}validateResponse(contracts, method, envelope);\n}}\n"
+    ));
     Ok(output)
+}
+
+fn qml_identifier(part: &str) -> bool {
+    let mut chars = part.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[derive(Serialize)]
@@ -205,6 +207,12 @@ mod tests {
 
     #[test]
     fn generation_validates_contracts_and_rejects_unsupported_schemas() {
+        assert!(["A", "_", "a1"].into_iter().all(super::qml_identifier));
+        assert!(
+            ["", "1a", "a-b", "é"]
+                .into_iter()
+                .all(|s| !super::qml_identifier(s))
+        );
         assert!(check_schema(&json!({"type":"array", "uniqueItems":true})).is_err());
         assert!(check_schema(&json!({"$ref":"https://example.invalid/schema"})).is_err());
         assert!(check_schema(&json!({"properties":{"nested":{"multipleOf":2}}})).is_err());

@@ -124,7 +124,7 @@ impl ServiceBoundary {
 
     /// Also covers binary clipboard publication, before domain decoding/copying.
     pub fn raw(&self, owner: Option<&str>, name: &str, bytes: usize) -> Result<Admitted, String> {
-        if name.is_empty() || name.len() > 256 || bytes > self.request_bytes {
+        if !(1..=256).contains(&name.len()) || bytes > self.request_bytes {
             return Err(self.reject(
                 "request-too-large",
                 "Request exceeds service limits; request was not dispatched",
@@ -134,7 +134,7 @@ impl ServiceBoundary {
     }
 
     pub fn subscribe(&self, owner: Option<&str>, streams: &[String]) -> Result<Admitted, String> {
-        if streams.len() > 64 || streams.iter().any(|s| s.is_empty() || s.len() > 256) {
+        if streams.len() > 64 || streams.iter().any(|s| !(1..=256).contains(&s.len())) {
             return Err(self.reject(
                 "request-too-large",
                 "Subscription exceeds service limits; request was not dispatched",
@@ -144,7 +144,7 @@ impl ServiceBoundary {
     }
 
     pub fn cancel(&self, owner: Option<&str>, id: &str) -> Result<Admitted, String> {
-        if id.is_empty() || id.len() > 256 {
+        if !(1..=256).contains(&id.len()) {
             return Err(self.reject(
                 "validation-error",
                 "Invalid cancellation identifier; request was not dispatched",

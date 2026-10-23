@@ -1,9 +1,9 @@
 use super::JsonDbusClient;
-use crate::transport_tests::Bus;
+use crate::transport_tests::{Bus, within_seconds};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use shelllist_daemon_core::DaemonEndpoint;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const ENDPOINT: DaemonEndpoint = DaemonEndpoint::new(
     "probe",
@@ -32,7 +32,7 @@ async fn server(bus: &Bus, owner: u8) -> zbus::Connection {
 
 #[tokio::test]
 async fn method_only_proxies_add_no_match_round_trips_and_follow_owner_replacement() {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    within_seconds(10, async {
         let bus = Bus::start();
         let first = server(&bus, 1).await;
         let monitor = bus.connection().await;
@@ -76,8 +76,7 @@ async fn method_only_proxies_add_no_match_round_trips_and_follow_owner_replaceme
         let _second = server(&bus, 2).await;
         assert_eq!(client.call("probe", json!({})).await.unwrap()["owner"], 2);
     })
-    .await
-    .expect("private-bus monitoring must terminate");
+    .await;
 }
 
 #[tokio::test]

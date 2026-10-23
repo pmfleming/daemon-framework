@@ -1,4 +1,5 @@
 use super::{Admitted, ServiceBoundary};
+use crate::transport_tests::{Bus, within_seconds};
 use shelllist_daemon_core::ApiIdentity;
 use tokio::sync::Semaphore;
 
@@ -71,8 +72,8 @@ impl Probe {
 
 #[tokio::test]
 async fn direct_bus_saturation_keeps_cleanup_available_without_dispatching_rejected_calls() {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let bus = crate::transport_tests::Bus::start();
+    within_seconds(5, async {
+        let bus = Bus::start();
         let server = bus.connection().await;
         let caller = bus.connection().await;
         let started = Arc::new(Semaphore::new(0));
@@ -137,6 +138,5 @@ async fn direct_bus_saturation_keeps_cleanup_available_without_dispatching_rejec
             true
         );
     })
-    .await
-    .expect("direct-bus admission must not deadlock");
+    .await;
 }

@@ -8,6 +8,16 @@ use std::{
     time::Duration,
 };
 
+/// Bound successful test operations; expected expiries use timeout directly.
+pub(crate) async fn within_seconds<T>(
+    seconds: u64,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    tokio::time::timeout(Duration::from_secs(seconds), future)
+        .await
+        .expect("test operation exceeded its deadline")
+}
+
 pub(crate) struct Bus {
     child: Child,
     address: String,
@@ -67,26 +77,18 @@ async fn owner_monitors_isolate_buses_and_report_owner_loss_and_bus_failure() {
     let _a = monitor_a.subscribe().await.unwrap();
     let mut losses = monitor_b.subscribe().await.unwrap();
     caller_a.close().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), monitor_a.wait(&owner))
-        .await
-        .unwrap()
-        .unwrap();
+    within_seconds(2, monitor_a.wait(&owner)).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(30), monitor_b.wait(&owner))
             .await
             .is_err()
     );
     caller_b.close().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), monitor_b.wait(&owner))
-        .await
-        .unwrap()
-        .unwrap();
+    within_seconds(2, monitor_b.wait(&owner)).await.unwrap();
     assert_eq!(losses.recv().await.unwrap(), owner);
     drop(second);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), losses.recv())
-            .await
-            .unwrap(),
+        within_seconds(2, losses.recv()).await,
         Err(crate::OwnerLossError::Stopped)
     );
 }
@@ -123,10 +125,7 @@ async fn shared_emission_preserves_wire_shape_and_directed_delivery() {
     )
     .await
     .unwrap();
-    let message = tokio::time::timeout(Duration::from_secs(2), received.next())
-        .await
-        .unwrap()
-        .unwrap();
+    let message = within_seconds(2, received.next()).await.unwrap();
     let body = message.body();
     let (stream, event): (String, &str) = body.deserialize().unwrap();
     assert_eq!(stream, "test.changed");

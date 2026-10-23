@@ -108,10 +108,7 @@ pub(crate) fn validate_root(root_inputs: &Inputs, framework_captured: bool) -> R
     for name in DAEMONS {
         if let Some(input) = root_inputs.get(*name) {
             ensure!(
-                input
-                    .pointer("/inputs/daemonFramework/follows")
-                    .and_then(Value::as_str)
-                    == Some("daemon-framework"),
+                input["inputs"]["daemonFramework"]["follows"].as_str() == Some("daemon-framework"),
                 "{name} must follow the single root daemon-framework input"
             );
         }
@@ -119,10 +116,7 @@ pub(crate) fn validate_root(root_inputs: &Inputs, framework_captured: bool) -> R
     if let Some(shelllist) = root_inputs.get("shelllist") {
         for name in std::iter::once(&"daemon-framework").chain(DAEMONS) {
             ensure!(
-                shelllist
-                    .pointer(&format!("/inputs/{name}/follows"))
-                    .and_then(Value::as_str)
-                    == Some(*name),
+                shelllist["inputs"][*name]["follows"].as_str() == Some(*name),
                 "shelllist/{name} must follow the root input"
             );
         }

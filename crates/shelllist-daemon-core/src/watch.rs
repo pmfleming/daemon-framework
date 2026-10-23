@@ -2,7 +2,7 @@
 //! the caller's responsibility. Register returned paths nonrecursively so the
 //! backend cannot grow an unbounded recursive watch set behind our budget.
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     io,
     path::PathBuf,
     time::{Duration, Instant},
@@ -58,39 +58,42 @@ pub fn bounded_watch_paths(
     roots: impl IntoIterator<Item = (PathBuf, bool)>,
     limit: usize,
 ) -> io::Result<Vec<PathBuf>> {
-    let mut paths = BTreeSet::new();
-    let mut expanded = BTreeSet::new();
-    let mut pending = roots.into_iter();
-    for (root, recursive) in &mut pending {
-        let mut stack = vec![(root, recursive)];
-        while let Some((path, recursive)) = stack.pop() {
-            if paths.insert(path.clone()) && paths.len() > limit {
-                return Err(io::Error::other(
-                    "watch registration budget exceeded; use polling",
-                ));
-            }
-            if recursive && expanded.insert(path.clone()) {
-                for entry in std::fs::read_dir(path)? {
-                    let entry = entry?;
-                    if entry.file_type()?.is_dir() {
-                        // Bound queued directories too, before traversing them.
-                        if paths.len() + stack.len() >= limit {
-                            return Err(io::Error::other(
-                                "watch registration budget exceeded; use polling",
-                            ));
-                        }
-                        stack.push((entry.path(), true));
-                    }
-                }
+    let mut paths = BTreeMap::new();
+    let mut roots = roots.into_iter();
+    let mut stack = Vec::new();
+    while let Some((path, recursive)) = stack.pop().or_else(|| roots.next()) {
+        // A nonrecursive registration must not prevent a later recursive root.
+        let expanded = paths.entry(path.clone()).or_insert(false);
+        let descend = recursive && !std::mem::replace(expanded, true);
+        check_watch_budget(paths.len(), limit)?;
+        if !descend {
+            continue;
+        }
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                // Bound queued directories too, before traversing them.
+                check_watch_budget(paths.len() + stack.len() + 1, limit)?;
+                stack.push((entry.path(), true));
             }
         }
     }
-    Ok(paths.into_iter().collect())
+    Ok(paths.into_keys().collect())
+}
+
+fn check_watch_budget(count: usize, limit: usize) -> io::Result<()> {
+    if count > limit {
+        return Err(io::Error::other(
+            "watch registration budget exceeded; use polling",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{WatchBackoff, bounded_watch_paths};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn flapping_construction_and_failures_back_off_until_sustained_health() {
@@ -117,12 +120,10 @@ mod tests {
         std::fs::create_dir_all(root.join("child/grandchild")).unwrap();
         std::fs::create_dir_all(dir.0.join("external/closure")).unwrap();
         std::os::unix::fs::symlink(dir.0.join("external"), root.join("link")).unwrap();
-        assert_eq!(
-            bounded_watch_paths([(root.clone(), true)], 3)
-                .unwrap()
-                .len(),
-            3
-        );
+        for recursive in [[true, true], [false, true], [true, false]] {
+            let roots = recursive.map(|recursive| (root.clone(), recursive));
+            assert_eq!(bounded_watch_paths(roots, 3).unwrap().len(), 3);
+        }
         assert!(bounded_watch_paths([(root.clone(), true)], 2).is_err());
         assert_eq!(
             bounded_watch_paths([(root.clone(), false)], 1).unwrap(),
