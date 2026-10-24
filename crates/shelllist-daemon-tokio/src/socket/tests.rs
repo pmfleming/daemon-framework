@@ -77,6 +77,26 @@ impl LocalJsonlService for Service {
                 .insert("late".into(), session.owner().into());
             self.completed.notify_one();
         }
+        if method == "burst-sync" {
+            self.resources
+                .lock()
+                .unwrap()
+                .insert("sync".into(), session.owner().into());
+            let emitter = crate::EventEmitter::from(session.clone());
+            for revision in 1..=64 {
+                if emitter
+                    .emit_sync("org.example.Test", "changed", json!({"revision":revision}))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            assert!(
+                emitter.is_closed(),
+                "bounded synchronous overflow must retire its owner"
+            );
+            self.completed.notify_one();
+        }
         let value = if method == "large" {
             json!({"data": "🦀".repeat(2*1024*1024)})
         } else {
@@ -94,6 +114,18 @@ impl LocalJsonlService for Service {
             .lock()
             .unwrap()
             .insert(id.clone(), session.owner().into());
+        if streams == ["burst-preack"] {
+            for revision in 1..=2 {
+                session
+                    .emit(
+                        "test.changed",
+                        json!({"subscription_id": id, "revision":revision}),
+                    )
+                    .await?;
+            }
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
         session
             .emit(
                 "test.changed",
@@ -188,6 +220,85 @@ async fn until(mut predicate: impl FnMut() -> bool) {
     .await
     .unwrap();
 }
+#[test]
+fn owner_identities_have_fresh_entropy_not_just_a_pid_and_counter() {
+    let a = new_owner().unwrap();
+    let b = new_owner().unwrap();
+    let nonce_a = a.split(':').nth(1).unwrap();
+    let nonce_b = b.split(':').nth(1).unwrap();
+    assert_eq!(nonce_a.len(), 32);
+    assert!(u128::from_str_radix(nonce_a, 16).is_ok());
+    assert_ne!(nonce_a, nonce_b);
+    assert!(a.starts_with("unix:") && b.starts_with("unix:"));
+}
+
+#[tokio::test]
+async fn pre_ack_overflow_closes_connection_instead_of_losing_a_baseline() {
+    let running = Running::start(JsonlSocketConfig {
+        pending_event_limit: 1,
+        ..Default::default()
+    })
+    .await;
+    let mut client = BufReader::new(UnixStream::connect(&running.path).await.unwrap());
+    send(
+        &mut client,
+        json!({"id":"sub","op":"subscribe","streams":["burst-preack"]}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(3), running.service.entered.notified())
+        .await
+        .unwrap();
+    until(|| running.service.disconnects.load(Ordering::SeqCst) > 0).await;
+    assert_eq!(next(&mut client).await["kind"], "transport-error");
+    let mut line = String::new();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), client.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    assert!(running.service.resources.lock().unwrap().is_empty());
+    running.service.release.notify_one();
+    running.finish().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn synchronous_event_overflow_retires_only_its_owner_without_blocking_the_executor() {
+    let running = Running::start(JsonlSocketConfig::default()).await;
+    let mut slow = BufReader::new(UnixStream::connect(&running.path).await.unwrap());
+    let mut peer = BufReader::new(UnixStream::connect(&running.path).await.unwrap());
+    send(
+        &mut slow,
+        json!({"id":"burst","op":"call","method":"burst-sync","params":{}}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(3), running.service.completed.notified())
+        .await
+        .unwrap();
+    until(|| running.service.disconnects.load(Ordering::SeqCst) > 0).await;
+    assert!(running.service.resources.lock().unwrap().is_empty());
+    // A real EOF, not merely an internal closed flag or a synthetic transport.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let mut line = String::new();
+            if slow.read_line(&mut line).await.unwrap() == 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    send(
+        &mut peer,
+        json!({"id":"peer","op":"call","method":"echo","params":{"live":true}}),
+    )
+    .await;
+    assert_eq!(next(&mut peer).await["response"]["live"], true);
+    drop(peer);
+    running.finish().await;
+}
+
 #[tokio::test]
 async fn filesystem_lock_stale_socket_modes_and_inode_cleanup() {
     let directory = Directory::new();

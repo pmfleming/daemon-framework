@@ -43,7 +43,7 @@ impl Service {
     }
     async fn subscribe(
         &self,
-        _streams: Vec<String>,
+        streams: Vec<String>,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> String {
@@ -60,6 +60,26 @@ impl Service {
                 },
             )
             .unwrap();
+        if streams == ["overflow"] {
+            let emitter = zbus::object_server::SignalEmitter::new(connection, "/test").unwrap();
+            let emitter = crate::directed_emitter(&emitter, &header);
+            for revision in 1..=2 {
+                emitter
+                    .emit(
+                        "org.shelllist.Deadlines",
+                        "Event",
+                        &(
+                            "state",
+                            json!({"subscription_id":"late-sub", "revision":revision}).to_string(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+            // Deliberately no acknowledgement: the writer must retire the
+            // bridge even when the frontend sends nothing more on stdin.
+            std::future::pending::<()>().await;
+        }
         json!({"data":{"subscription":{"id":"late-sub"}}}).to_string()
     }
 }
@@ -170,6 +190,69 @@ async fn call_and_cancel_deadlines_preserve_outcomes_ownership_and_no_replay() -
     .await;
     assert_eq!(effects.load(Ordering::SeqCst), 2);
     output.finish().await
+}
+
+#[tokio::test]
+async fn bridge_pre_ack_overflow_notifies_idle_frontend_stops_dispatch_and_drops_owner()
+-> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let bus = Bus::start();
+    let server = bus.connection().await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let (lifetime, released) = oneshot::channel();
+    server
+        .object_server()
+        .at(
+            "/test",
+            Service {
+                effects: effects.clone(),
+                subscriptions: Arc::default(),
+                subscription_lifetime: Arc::new(Mutex::new(Some(lifetime))),
+            },
+        )
+        .await?;
+    server.request_name(ENDPOINT.bus_name).await?;
+    let dbus = ReconnectingClient::new(ENDPOINT);
+    *dbus.current.lock().await = Some(JsonDbusClient::new(bus.connection().await, ENDPOINT));
+    let (frontend, bridge) = tokio::io::duplex(4096);
+    let (input, writer) = tokio::io::split(bridge);
+    let mut frontend = BufReader::new(frontend);
+    let task = tokio::spawn(super::run_client_io(
+        super::JsonlClientConfig {
+            endpoint: ENDPOINT,
+            correlation: crate::BasicCorrelation,
+            pending_event_limit: 1,
+            max_in_flight_requests: 1,
+            shutdown_timeout: Some(Duration::from_secs(1)),
+        },
+        shelllist_daemon_core::DEFAULT_JSONL_REQUEST_BYTES,
+        dbus,
+        BufReader::new(input),
+        writer,
+    ));
+    frontend
+        .get_mut()
+        .write_all(b"{\"op\":\"subscribe\",\"id\":\"sub\",\"streams\":[\"overflow\"]}\n")
+        .await?;
+    let mut line = String::new();
+    assert!(within_seconds(2, frontend.read_line(&mut line)).await? > 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line)?["kind"],
+        "transport-error"
+    );
+    // The input remains open. Writer failure itself ends dispatch and ownership.
+    let error = within_seconds(2, task).await?.unwrap_err();
+    assert!(format!("{error:#}").contains("event capacity exhausted"));
+    assert!(within_seconds(2, released).await.is_err());
+    assert!(
+        frontend
+            .get_mut()
+            .write_all(b"{\"op\":\"call\",\"id\":\"late\",\"method\":\"slow\"}\n")
+            .await
+            .is_err()
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    Ok(())
 }
 
 #[tokio::test]

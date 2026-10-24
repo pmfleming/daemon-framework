@@ -85,6 +85,16 @@ impl SocketSession {
             })
             .await
     }
+    /// Synchronous producers must not block a runtime worker on backpressure.
+    /// Fail closed rather than silently drop an event or grow an unbounded queue.
+    pub fn try_emit(&self, stream: impl Into<String>, event: Value) -> Result<()> {
+        ensure!(!self.is_closed(), "socket session closed");
+        let result = self.output.try_event(stream.into(), event);
+        if result.is_err() {
+            self.close();
+        }
+        result
+    }
     fn close(&self) {
         self.closed.send_replace(true);
     }
@@ -190,6 +200,27 @@ impl JsonlListener {
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
+fn new_owner() -> Result<Arc<str>> {
+    // Persistent domain claims must not match a new connection after PID reuse.
+    // Kernel entropy only; unavailable entropy rejects ingress, never falls back
+    // to timestamps/PIDs. NONBLOCK also protects a single-worker executor.
+    let mut bytes = [0u8; 16];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let count =
+            rustix::rand::getrandom(&mut bytes[filled..], rustix::rand::GetRandomFlags::NONBLOCK)
+                .context("mint socket owner identity")?;
+        ensure!(count > 0, "kernel returned no socket owner entropy");
+        filled += count;
+    }
+    Ok(format!(
+        "unix:{:032x}:{}",
+        u128::from_le_bytes(bytes),
+        NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
+    )
+    .into())
+}
+
 struct DisconnectGuard<S: LocalJsonlService> {
     session: Option<SocketSession>,
     service: Arc<S>,
@@ -225,12 +256,7 @@ async fn connection<S: LocalJsonlService, P: CorrelationPolicy>(
     let _writer_guard = crate::AbortOnDrop(output_task.abort_handle());
     let (closed, _) = watch::channel(false);
     let session = SocketSession {
-        owner: format!(
-            "unix:{}:{}",
-            std::process::id(),
-            NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
-        )
-        .into(),
+        owner: new_owner()?,
         output,
         closed,
     };

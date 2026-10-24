@@ -9,7 +9,7 @@ use shelllist_daemon_core::{
     ClientMessage, ClientRequest, ClientRoute, DEFAULT_JSONL_REQUEST_BYTES, DaemonEndpoint,
     MAX_JSONL_REQUEST_BYTES,
 };
-use tokio::io::BufReader;
+use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -118,31 +118,55 @@ pub async fn run_jsonl_client_with_input_limit<P: CorrelationPolicy>(
     config: JsonlClientConfig<P>,
     maximum_request_bytes: usize,
 ) -> Result<()> {
+    let dbus = ReconnectingClient::new(config.endpoint);
+    run_client_io(
+        config,
+        maximum_request_bytes,
+        dbus,
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+async fn run_client_io<P, R, W>(
+    config: JsonlClientConfig<P>,
+    maximum_request_bytes: usize,
+    dbus: ReconnectingClient,
+    input: R,
+    writer: W,
+) -> Result<()>
+where
+    P: CorrelationPolicy,
+    R: AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     anyhow::ensure!(
         (1..=MAX_JSONL_REQUEST_BYTES).contains(&maximum_request_bytes),
         "invalid JSONL request byte limit"
     );
-    let dbus = ReconnectingClient::new(config.endpoint);
-    let (output, output_task) = spawn_output_actor_with_writer(
+    let (output, mut output_task) = spawn_output_actor_with_writer(
         config.correlation,
         OUTPUT_CAPACITY,
         config.pending_event_limit,
-        tokio::io::stdout(),
+        writer,
     );
+    let _output_guard = AbortOnDrop(output_task.abort_handle());
     let event_task =
         AbortOnDrop(spawn_event_forwarder(dbus.clone(), output.clone()).abort_handle());
     let owner_task = AbortOnDrop(spawn_owner_watcher(dbus.clone(), output.clone()).abort_handle());
 
     let mut calls = JoinSet::new();
     let request_slots = RequestSlots::new(config.max_in_flight_requests.max(1));
-    let shutdown_id = request_loop(
-        &dbus,
-        &output,
-        &mut calls,
-        &request_slots,
-        maximum_request_bytes,
-    )
-    .await?;
+    let shutdown_id = tokio::select! {
+        result = request_loop(&dbus, &output, &mut calls, &request_slots, input, maximum_request_bytes) => result?,
+        result = &mut output_task => {
+            // Stop dispatch even when stdin is idle. On logical overflow the
+            // writer has already sent transport-error so stdio frontends can
+            // close their input/restart; no later request enters this generation.
+            return result.context("join JSONL output task")?.context("run JSONL output task");
+        }
+    };
     drain_calls(&mut calls, config.shutdown_timeout).await;
     cancel_active(&dbus, &output, CONTROL_TIMEOUT).await;
 
@@ -157,15 +181,19 @@ pub async fn run_jsonl_client_with_input_limit<P: CorrelationPolicy>(
         .context("run JSONL output task")
 }
 
-async fn request_loop(
+async fn request_loop<R: AsyncBufRead + Unpin>(
     dbus: &ReconnectingClient,
     output: &OutputHandle,
     calls: &mut JoinSet<()>,
     request_slots: &RequestSlots,
+    input: R,
     maximum_request_bytes: usize,
 ) -> Result<Option<String>> {
-    let mut frames = Frames::new(BufReader::new(tokio::io::stdin()), maximum_request_bytes);
+    let mut frames = Frames::new(input, maximum_request_bytes);
     while let Some(frame) = frames.next().await.context("read JSONL request")? {
+        // Buffered input can be ready in the same poll as writer failure.
+        // Do not admit another frame before select gets to observe that exit.
+        anyhow::ensure!(!output.is_closed(), "JSONL output closed before dispatch");
         let line = match frame {
             Frame::Line(line) => line,
             Frame::TooLarge => {
@@ -538,6 +566,49 @@ mod tests {
     use shelllist_daemon_core::{ClientMessage, ClientRequest, DaemonEndpoint};
 
     use tokio::task::JoinSet;
+
+    #[tokio::test]
+    async fn closed_writer_rejects_already_buffered_input_before_admission() -> Result<()> {
+        let (output, task) = crate::output_actor::spawn_output_actor_with_writer(
+            crate::BasicCorrelation,
+            1,
+            0,
+            tokio::io::sink(),
+        );
+        output
+            .send(crate::output_actor::OutputCommand::Event {
+                stream: "state".into(),
+                event: json!({"subscription_id":"unacknowledged"}),
+            })
+            .await?;
+        assert!(task.await?.is_err());
+        assert!(output.is_closed());
+        let dbus = ReconnectingClient::new(DaemonEndpoint::new(
+            "test",
+            "org.test.Daemon",
+            "/test",
+            "org.test.Daemon",
+        ));
+        let mut calls = JoinSet::new();
+        // Zero slots keep this regression isolated even if the guard breaks;
+        // without the guard the buffered request would be silently consumed.
+        let input = tokio::io::BufReader::new(
+            &b"{\"op\":\"call\",\"id\":\"late\",\"method\":\"must.not.execute\"}\n"[..],
+        );
+        let error = super::request_loop(
+            &dbus,
+            &output,
+            &mut calls,
+            &RequestSlots::new(0),
+            input,
+            shelllist_daemon_core::DEFAULT_JSONL_REQUEST_BYTES,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("output closed before dispatch"));
+        assert!(calls.is_empty());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn invalid_limits_and_overload_are_rejected_before_dispatch() -> Result<()> {

@@ -15,18 +15,39 @@ lock inode remains. This is same-UID isolation, not a sandbox against that UID.
 `LocalJsonlService` adapters MUST use the same service boundary and domain
 coordinators as their D-Bus interface, not an alternative admission path.
 `SocketSession::owner()` is server-minted and disjoint from D-Bus unique names.
-Subscriptions use `spawn_until(..., session.closed(), ...)`; operation cancellation
-remains owner-scoped domain policy. `disconnected()` is idempotent, signals
+Each identity includes fresh kernel entropy, not just a PID/counter that could
+collide with persisted claims after process restart/PID reuse. Entropy failure
+rejects ingress without a weak fallback.
+Subscriptions use `spawn_until(..., session.closed(), ...)`, or an owner-scoped
+actor whose closed destinations cannot remain eligible observers. Actor cleanup
+must remove that owner's subscriptions; D-Bus reconciliation must exclude socket
+owners. Operation cancellation remains owner-scoped domain policy. `disconnected()` is idempotent, signals
 cancellation rather than rollback, and is called again after late accepted work.
 An adapter must not assume that losing a reply stops a physical effect.
 
 The socket reuses the bridge's bounded UTF-8 framing, ClientMessage validation,
 request/control lanes, output actor, correlation policy, route echo and release
 semantics. There is no D-Bus round trip or stdio subprocess in this path. D-Bus and
-the legacy `client` command remain available and unchanged during the experiment.
+the legacy `client` command remain available with the same wire contract.
 The socket has bounded connections, pending requests, output queues, record sizes
 and per-record write deadlines. A blocked writer retires the whole connection,
-never resumes a partially written record on another connection.
+never resumes a partially written record on another connection. The shared
+pre-ack buffer also fails closed on exhaustion (including a zero limit), rather
+than evicting an initial baseline or final event with no later loss witness.
+This applies to the legacy bridge as well as sockets. A logical overflow emits a
+fatal `transport-error` before the writer exits; the bridge watches writer exit
+alongside input and immediately stops dispatch/ownership even if input is idle.
+Stdio clients must retire/close their input on that fatal frame, not await another
+request. Private-bus integration verifies notification, no post-failure effect and
+owner cleanup using the production bridge loop.
+
+`EventEmitter` carries a directed D-Bus emitter or a socket destination without
+rebuilding domain envelopes. Async producers use `emit`; existing synchronous
+producers can use `emit_sync`. Its socket path uses `SocketSession::try_emit`:
+bounded admission, immediate connection retirement on saturation, no blocking a
+single-worker Tokio executor while its output actor needs to run. D-Bus sync
+emission retains its previous blocking behavior. This is fail-closed backpressure,
+not a promise that every producer burst can be delivered without reconnecting.
 
 Ordinary acknowledgement expiry is outcome-unknown and NEVER retries an effect.
 Accepted work keeps its admission permit while it finishes, even when its waiter
@@ -46,7 +67,16 @@ Validation uses actual Unix sockets: lock/stale inode/mode protection, owner-sco
 cancellation and release, event-before-ack routing, independent connection cleanup,
 shared service admission with a direct-bus owner, late-effect cleanup, malformed
 frame resynchronization, byte-fragmented UTF-8, 8 MiB replies and stalled readers.
-The existing D-Bus/bridge transport tests remain in the same suite.
+The existing D-Bus/bridge transport tests remain in the same suite. Single-worker
+regressions verify synchronous overflow closes the peer without stalling other
+connections, and pre-ack overflow produces EOF/owner cleanup rather than eviction.
+
+Bluetooth has completed the isolated prototype gates below, with opt-in frontend
+selection. NM now uses the same in-process boundary/worker lanes on both ingress
+paths; its private-bus tests cover parity, validation, owner isolation, connect
+cancellation and listener recreation. An explicit real-Quickshell NM probe covers
+shared-session reads and independent subscription renewal. These are not release,
+whole-desktop, sustained-load or OS-process-crash acceptance; defaults stay staged.
 
 ## Next gates
 

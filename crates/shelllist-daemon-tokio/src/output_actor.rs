@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -99,6 +99,10 @@ pub(crate) struct OutputHandle {
 }
 
 impl OutputHandle {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.priority_sender.is_closed()
+    }
+
     pub(crate) async fn send(&self, command: OutputCommand) -> Result<()> {
         let sender = if matches!(command, OutputCommand::Event { .. }) {
             &self.event_sender
@@ -109,6 +113,12 @@ impl OutputHandle {
             .send(command)
             .await
             .context("send daemon output command")
+    }
+
+    pub(crate) fn try_event(&self, stream: String, event: Value) -> Result<()> {
+        self.event_sender
+            .try_send(OutputCommand::Event { stream, event })
+            .context("admit synchronous daemon event")
     }
 
     pub(crate) async fn owned_ids(&self, route: &ClientRoute) -> Vec<String> {
@@ -171,25 +181,31 @@ impl<P: CorrelationPolicy> OutputState<P> {
         pending
     }
 
-    fn accept_event(&mut self, id: Option<String>, stream: String, event: Value) -> Option<Value> {
-        match id {
+    fn accept_event(
+        &mut self,
+        id: Option<String>,
+        stream: String,
+        event: Value,
+    ) -> Result<Option<Value>> {
+        Ok(match id {
             Some(id) if self.suppressed_ids.contains(&id) => None,
             Some(id) if !self.active_ids.contains_key(&id) => {
-                self.buffer(id, stream, event);
+                self.buffer(id, stream, event)?;
                 None
             }
             id => Some(self.event_message(&stream, event, id)),
-        }
+        })
     }
 
-    fn buffer(&mut self, id: String, stream: String, event: Value) {
-        if self.pending_limit == 0 {
-            return;
-        }
-        if self.pending_events.len() >= self.pending_limit {
-            self.pending_events.pop_front();
-        }
+    fn buffer(&mut self, id: String, stream: String, event: Value) -> Result<()> {
+        // A lost initial baseline or final operation event may have no later
+        // revision to reveal the loss. Retire the transport, never silently evict.
+        ensure!(
+            self.pending_events.len() < self.pending_limit,
+            "pre-acknowledgement event capacity exhausted; reconnect and reconcile state"
+        );
         self.pending_events.push_back((id, stream, event));
+        Ok(())
     }
 
     fn take_pending(&mut self, id: &str) -> VecDeque<(String, String, Value)> {
@@ -346,7 +362,15 @@ where
         }
         OutputCommand::Event { stream, event } => {
             let id = state.policy.event_id(&stream, &event);
-            state.accept_event(id, stream, event)
+            match state.accept_event(id, stream, event) {
+                Ok(message) => message,
+                Err(error) => {
+                    // The retained stdio bridge must also notify an idle
+                    // frontend immediately, not wait for another request.
+                    emit_line(writer, &transport_error_message(format!("{error:#}"))).await?;
+                    return Err(error);
+                }
+            }
         }
         OutputCommand::ProtocolError(error) => Some(protocol_error_message(error)),
         OutputCommand::TransportError(error) => Some(transport_error_message(error)),
@@ -387,11 +411,10 @@ where
     let line = addressed_message(line, route.as_ref());
     let pending = state.activate(tracked, route);
     emit_line(writer, &line).await?;
-    for message in pending
-        .into_iter()
-        .filter_map(|(id, stream, event)| state.accept_event(Some(id), stream, event))
-    {
-        emit_line(writer, &message).await?;
+    for (id, stream, event) in pending {
+        if let Some(message) = state.accept_event(Some(id), stream, event)? {
+            emit_line(writer, &message).await?;
+        }
     }
     Ok(())
 }

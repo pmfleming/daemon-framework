@@ -6,6 +6,8 @@ mod transport_tests;
 mod blocking;
 mod dbus;
 pub use blocking::{BlockingLane, LaneError, LaneShutdown};
+mod event;
+pub use event::EventEmitter;
 mod file;
 mod forward;
 mod jsonl;
