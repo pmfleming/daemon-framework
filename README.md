@@ -68,6 +68,11 @@ using the existing routed protocol and domain admission. This is an additive
 framework foundation; consumers and Quickshell acceptance are separate rollout
 gates. D-Bus and the bridge remain supported.
 
+The test-only [private qualification harness](tests/private-qualification.md) reuses
+native fixtures for bounded mixed traffic and explicit memory/source/binary evidence.
+Its [matched-release contract](contracts/private-qualification.md) separates
+correctness self-tests from queued serial performance measurements.
+
 ## Routed JSONL clients
 
 Calls, subscriptions and cancellations accept optional bridge-local metadata:

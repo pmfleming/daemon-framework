@@ -99,6 +99,15 @@ impl LocalJsonlService for Service {
         }
         let value = if method == "large" {
             json!({"data": "🦀".repeat(2*1024*1024)})
+        } else if method == "owned-status" {
+            let owned = params["id"].as_str().is_some_and(|id| {
+                self.resources
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .is_some_and(|owner| owner == session.owner())
+            });
+            json!({"owned": owned})
         } else {
             params
         };
@@ -201,15 +210,16 @@ async fn send(stream: &mut BufReader<UnixStream>, value: Value) {
         .unwrap();
 }
 async fn next(stream: &mut BufReader<UnixStream>) -> Value {
+    next_with_bytes(stream).await.0
+}
+async fn next_with_bytes(stream: &mut BufReader<UnixStream>) -> (Value, usize) {
     let mut line = String::new();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(3), stream.read_line(&mut line))
-            .await
-            .unwrap()
-            .unwrap()
-            > 0
-    );
-    serde_json::from_str(&line).unwrap()
+    let bytes = tokio::time::timeout(Duration::from_secs(3), stream.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bytes > 0);
+    (serde_json::from_str(&line).unwrap(), bytes)
 }
 async fn until(mut predicate: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -220,6 +230,8 @@ async fn until(mut predicate: impl FnMut() -> bool) {
     .await
     .unwrap();
 }
+mod qualification;
+
 #[test]
 fn owner_identities_have_fresh_entropy_not_just_a_pid_and_counter() {
     let a = new_owner().unwrap();
