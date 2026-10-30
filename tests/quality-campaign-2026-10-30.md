@@ -125,3 +125,18 @@ Negative control: temporarily omitting `--deduplicate` makes this same test fail
 at `copy symlink` with EEXIST (`stage4-negative-dedup.log`); the correct source was
 restored. This expected failure is sensitivity evidence, not a passing test run.
 Crate/all-target strict Clippy and formatting pass (`stage4-{tests,clippy}.log`).
+
+## Stage 5: decimal decomposition
+
+Select mantissa/exponent together at the normal/subnormal boundary instead of
+testing the same exponent twice. Keep exact rational tie detection, negative-zero
+normalization, limits and formatter output unchanged. Replace the decimal test's
+wildcard import with its actual dependency.
+
+The existing test now adds **1,028 exact-eighth/digit vectors**, with an independent
+integer half-away-from-zero oracle, and four subnormal/normal boundary vectors.
+These supplement, rather than replace, the existing decimal, nonfinite and bound
+assertions. The expanded owner passes before and after the refactor. These are
+vector counts, not 1,028 distinct behaviors or a numeric branch-coverage claim.
+Core crate **12 library + 1 generator tests pass**, zero doctests; strict all-target
+Clippy, formatting and diff checks pass. Raw logs: `stage5-{before-tests,tests,clippy}.log`.
