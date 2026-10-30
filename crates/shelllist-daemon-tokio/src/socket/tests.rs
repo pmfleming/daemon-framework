@@ -381,6 +381,54 @@ async fn routes_early_events_release_and_connection_ownership() {
     server.finish().await;
 }
 #[tokio::test]
+async fn saturated_requests_leave_controls_available_and_shutdown_drains_accepted_work() {
+    let server = Running::start(JsonlSocketConfig {
+        max_in_flight_requests: 1,
+        ..Default::default()
+    })
+    .await;
+    let mut client = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
+    send(
+        &mut client,
+        json!({"op":"call","id":"held","method":"hold"}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(3), server.service.entered.notified())
+        .await
+        .unwrap();
+    for request in [
+        json!({"op":"call","id":"rejected","method":"echo"}),
+        json!({"op":"subscribe","id":"rejected","streams":[]}),
+    ] {
+        send(&mut client, request).await;
+        let response = next(&mut client).await;
+        assert_eq!(response["id"], "rejected");
+        assert_eq!(response["outcome"], "rejected-before-dispatch");
+    }
+    send(
+        &mut client,
+        json!({"op":"cancel","id":"control","request_id":"absent"}),
+    )
+    .await;
+    assert_eq!(next(&mut client).await["id"], "control");
+    send(&mut client, json!({"op":"shutdown","id":"done"})).await;
+    // Shutdown waits for the already-admitted effect; it must not acknowledge early.
+    let mut line = String::new();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), client.read_line(&mut line))
+            .await
+            .is_err()
+    );
+    server.service.release.notify_one();
+    assert_eq!(next(&mut client).await["id"], "held");
+    let response = next(&mut client).await;
+    assert_eq!(response["id"], "done");
+    assert_eq!(response["response"]["shutdown"], true);
+    until(|| server.service.resources.lock().unwrap().is_empty()).await;
+    server.finish().await;
+}
+
+#[tokio::test]
 async fn deadlines_do_not_abort_effects_or_free_shared_admission_and_late_work_is_cleaned() {
     let server = Running::start(JsonlSocketConfig {
         request_timeout: Duration::from_millis(30),

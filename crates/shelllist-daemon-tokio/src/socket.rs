@@ -25,7 +25,7 @@ use std::{
 use tokio::{
     io::BufReader,
     net::UnixStream,
-    sync::{Semaphore, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
     task::JoinSet,
 };
 
@@ -269,7 +269,7 @@ async fn connection<S: LocalJsonlService, P: CorrelationPolicy>(
     let mut frames = Frames::new(BufReader::new(reader), config.maximum_request_bytes);
     let reading = async {
         while let Some(frame) = frames.next().await? {
-            match frame {
+            let line = match frame {
                 Frame::TooLarge => {
                     session
                         .output
@@ -277,46 +277,43 @@ async fn connection<S: LocalJsonlService, P: CorrelationPolicy>(
                             "JSONL request exceeds {} bytes",
                             config.maximum_request_bytes
                         )))
-                        .await?
+                        .await?;
+                    while calls.try_join_next().is_some() {}
+                    continue;
                 }
-                Frame::Line(line) => {
-                    if let Some(message) = parse_request(&line, &session.output).await? {
-                        if let ClientRequest::Shutdown { id } = message.request {
-                            while calls.join_next().await.is_some() {}
-                            session.output.send(OutputCommand::Shutdown(id)).await?;
-                            let _ = session.output.active_ids().await; // ordered writer barrier
-                            return Ok::<_, anyhow::Error>(());
-                        }
-                        let id = request_id(&message.request).to_owned();
-                        match slots.acquire(&message.request) {
-                        Ok(permit) => {
-                            let (service, session, budget) = (service.clone(), session.clone(), config.request_timeout);
-                            calls.spawn(async move {
-                                let ClientMessage { request, route } = message;
-                                let control = !matches!(request, ClientRequest::Call { .. });
-                                let work_service = service.clone(); let work_session = session.clone();
-                                let work_route = route.clone();
-                                // Keep accepted work AND its permit alive on lost reply/deadline.
-                                // Dropping a JoinHandle detaches; it does not claim effects rolled back.
-                                let mut work = tokio::spawn(async move {
-                                    let _permit = permit;
-                                    let result = crate::catch_task("socket request", dispatch(work_service.as_ref(), &work_session, request, work_route)).await;
-                                    if work_session.is_closed() { work_service.disconnected(&work_session).await; }
-                                    result
-                                });
-                                let command = match tokio::time::timeout(budget, &mut work).await {
-                                    Ok(Ok(Ok((value, cancelled)))) => response_command(id, Ok(value), cancelled, route),
-                                    _ => {
-                                        if control { session.close(); }
-                                        OutputCommand::RequestError { id, route, outcome: "outcome-unknown", message: "socket request reply unavailable; reconcile state, never replay effects".into() }
-                                    },
-                                };
-                                let _ = session.output.send(command).await;
-                            });
-                        }
-                        Err(_) => session.output.send(OutputCommand::RequestError { id, route: message.route, outcome: "rejected-before-dispatch", message: "socket request capacity exceeded; request was not dispatched".into() }).await?,
-                    }
-                    }
+                Frame::Line(line) => line,
+            };
+            let Some(message) = parse_request(&line, &session.output).await? else {
+                while calls.try_join_next().is_some() {}
+                continue;
+            };
+            if let ClientRequest::Shutdown { id } = message.request {
+                while calls.join_next().await.is_some() {}
+                session.output.send(OutputCommand::Shutdown(id)).await?;
+                let _ = session.output.active_ids().await; // ordered writer barrier
+                return Ok::<_, anyhow::Error>(());
+            }
+            match slots.acquire(&message.request) {
+                Ok(permit) => {
+                    calls.spawn(execute_request(
+                        service.clone(),
+                        session.clone(),
+                        message,
+                        permit,
+                        config.request_timeout,
+                    ));
+                }
+                Err(_) => {
+                    session
+                        .output
+                        .send(OutputCommand::RequestError {
+                            id: request_id(&message.request).to_owned(),
+                            route: message.route,
+                            outcome: "rejected-before-dispatch",
+                            message: "socket request capacity exceeded; request was not dispatched"
+                                .into(),
+                        })
+                        .await?
                 }
             }
             while calls.try_join_next().is_some() {}
@@ -339,6 +336,50 @@ async fn connection<S: LocalJsonlService, P: CorrelationPolicy>(
         let _ = output_task.await;
     }
     result
+}
+
+// A reply waiter may end while accepted work keeps its admission and lifetime.
+async fn execute_request<S: LocalJsonlService>(
+    service: Arc<S>,
+    session: SocketSession,
+    message: ClientMessage,
+    permit: OwnedSemaphorePermit,
+    budget: Duration,
+) {
+    let ClientMessage { request, route } = message;
+    let id = request_id(&request).to_owned();
+    let control = !matches!(request, ClientRequest::Call { .. });
+    let work_session = session.clone();
+    let work_route = route.clone();
+    // Dropping a JoinHandle detaches; it never claims effects rolled back.
+    let mut work = tokio::spawn(async move {
+        let _permit = permit;
+        let result = crate::catch_task(
+            "socket request",
+            dispatch(service.as_ref(), &work_session, request, work_route),
+        )
+        .await;
+        if work_session.is_closed() {
+            service.disconnected(&work_session).await;
+        }
+        result
+    });
+    let command = match tokio::time::timeout(budget, &mut work).await {
+        Ok(Ok(Ok((value, cancelled)))) => response_command(id, Ok(value), cancelled, route),
+        _ => {
+            if control {
+                session.close();
+            }
+            OutputCommand::RequestError {
+                id,
+                route,
+                outcome: "outcome-unknown",
+                message: "socket request reply unavailable; reconcile state, never replay effects"
+                    .into(),
+            }
+        }
+    };
+    let _ = session.output.send(command).await;
 }
 
 fn request_id(request: &ClientRequest) -> &str {
