@@ -478,6 +478,12 @@ async fn fragmented_utf8_oversized_frame_resynchronization_and_long_response() {
     })
     .await;
     let mut a = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
+    // Blank records are silent; malformed JSON and invalid routes never dispatch.
+    a.get_mut().write_all(b"\n \n{\n{\"op\":\"call\",\"id\":\"bad\",\"method\":\"hold\",\"route\":{\"consumerId\":\"v\",\"localId\":\"l\",\"generation\":1,\"kind\":\"control\"}}\n")
+        .await.unwrap();
+    for _ in 0..2 {
+        assert_eq!(next(&mut a).await["kind"], "protocol-error");
+    }
     let bytes = format!(
         "{}\n",
         json!({"op":"call","id":"unicode","method":"echo","params":{"text":"你好 🦀"}})

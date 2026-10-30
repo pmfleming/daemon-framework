@@ -83,3 +83,15 @@ the lifecycle boundary and formatting increase lines; this is not a LOC win.
 These are bounded implementation/test changes, not whole-program dead-code claims.
 The only removed API planned above is private to the local-build binary crate.
 Final metrics, coverage, validation and limitations will be recorded below.
+
+## Stage 2: shared frame validation
+
+Both socket and bridge now call `jsonl::parse_frame`; framing stays cancellation
+safe and oversized records still drain before parsing. Byte-limit messages and
+route validation are unchanged. Extend the existing native framing test with
+silent blank input, malformed JSON and a wrongly routed `hold` call, followed by
+successful Unicode traffic. That proves invalid input did not consume admission.
+
+`cargo test -p shelllist-daemon-tokio --locked`: **43 passed, 1 ignored**;
+doctests have zero examples. Crate/all-target strict Clippy and formatting pass.
+Logs: `target/quality-campaign/stage2-{tests,clippy}.log`.

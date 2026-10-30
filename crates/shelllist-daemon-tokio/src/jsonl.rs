@@ -194,19 +194,8 @@ async fn request_loop<R: AsyncBufRead + Unpin>(
         // Buffered input can be ready in the same poll as writer failure.
         // Do not admit another frame before select gets to observe that exit.
         anyhow::ensure!(!output.is_closed(), "JSONL output closed before dispatch");
-        let line = match frame {
-            Frame::Line(line) => line,
-            Frame::TooLarge => {
-                output
-                    .send(OutputCommand::ProtocolError(format!(
-                        "JSONL request exceeds {maximum_request_bytes} bytes"
-                    )))
-                    .await?;
-                reap_finished(calls);
-                continue;
-            }
-        };
-        let Some(request) = parse_request(&line, output).await? else {
+        let Some(request) = parse_frame(frame, output, maximum_request_bytes).await? else {
+            reap_finished(calls);
             continue;
         };
         if let ClientRequest::Shutdown { id } = request.request {
@@ -218,14 +207,26 @@ async fn request_loop<R: AsyncBufRead + Unpin>(
     Ok(None)
 }
 
-pub(crate) async fn parse_request(
-    line: &str,
+pub(crate) async fn parse_frame(
+    frame: Frame,
     output: &OutputHandle,
+    maximum_request_bytes: usize,
 ) -> Result<Option<ClientMessage>> {
+    let line = match frame {
+        Frame::Line(line) => line,
+        Frame::TooLarge => {
+            output
+                .send(OutputCommand::ProtocolError(format!(
+                    "JSONL request exceeds {maximum_request_bytes} bytes"
+                )))
+                .await?;
+            return Ok(None);
+        }
+    };
     if line.trim().is_empty() {
         return Ok(None);
     }
-    let request = serde_json::from_str::<ClientMessage>(line)
+    let request = serde_json::from_str::<ClientMessage>(&line)
         .map_err(|error| error.to_string())
         .and_then(|request| request.validate().map(|()| request).map_err(str::to_owned));
     match request {

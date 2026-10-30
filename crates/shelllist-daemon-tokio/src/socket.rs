@@ -1,11 +1,7 @@
 //! Same-user JSONL ingress. Domain dispatch and admission stay in the daemon.
 use crate::{
     CorrelationPolicy,
-    jsonl::{
-        RequestSlots, cancellation_succeeded,
-        input::{Frame, Frames},
-        parse_request, response_command,
-    },
+    jsonl::{RequestSlots, cancellation_succeeded, input::Frames, parse_frame, response_command},
     output_actor::{OutputCommand, OutputHandle, spawn_output_actor_with_writer},
 };
 use anyhow::{Context, Result, ensure};
@@ -269,21 +265,9 @@ async fn connection<S: LocalJsonlService, P: CorrelationPolicy>(
     let mut frames = Frames::new(BufReader::new(reader), config.maximum_request_bytes);
     let reading = async {
         while let Some(frame) = frames.next().await? {
-            let line = match frame {
-                Frame::TooLarge => {
-                    session
-                        .output
-                        .send(OutputCommand::ProtocolError(format!(
-                            "JSONL request exceeds {} bytes",
-                            config.maximum_request_bytes
-                        )))
-                        .await?;
-                    while calls.try_join_next().is_some() {}
-                    continue;
-                }
-                Frame::Line(line) => line,
-            };
-            let Some(message) = parse_request(&line, &session.output).await? else {
+            let Some(message) =
+                parse_frame(frame, &session.output, config.maximum_request_bytes).await?
+            else {
                 while calls.try_join_next().is_some() {}
                 continue;
             };
