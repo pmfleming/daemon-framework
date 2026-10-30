@@ -109,3 +109,19 @@ cancellation rejection (despite equal consumer/generation metadata), and address
 effect timeout. Existing early-event/release and late-effect cleanup assertions
 remain. Selected native tests **16 passed**; crate/all-target strict Clippy,
 formatting and diff checks pass. Logs: `stage3-{tests,clippy}.log` in the raw directory.
+
+## Stage 4: snapshot bookkeeping
+
+Use `git ls-files --cached --deduplicate -z` instead of collecting every tracked
+path into a BTreeSet. Git remains the inventory owner; dirty contents, deletions,
+ordering, metadata and confinement are retained. Remove the private `prepare`
+forwarder and rename its five-argument implementation; every internal caller now
+states both frozen-root and capture-root policy. The CLI is unchanged.
+
+The new conflicted-file scenario passed against the previous implementation
+(`stage4-before-tests.log`). Extend it to a conflicted symlink as well; the final
+**5 unit + 3 CLI integration tests pass**, including approval-lock preservation.
+Negative control: temporarily omitting `--deduplicate` makes this same test fail
+at `copy symlink` with EEXIST (`stage4-negative-dedup.log`); the correct source was
+restored. This expected failure is sensitivity evidence, not a passing test run.
+Crate/all-target strict Clippy and formatting pass (`stage4-{tests,clippy}.log`).

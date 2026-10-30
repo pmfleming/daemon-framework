@@ -162,6 +162,38 @@ fn snapshots_capture_dirty_files_preserve_metadata_and_confine_symlinks() {
         symlink(target, root.join(name)).unwrap();
     }
     git(&root, &["add", "."]);
+    // A real conflicted index lists one worktree path at three merge stages.
+    // Snapshot it once, using the dirty worktree contents rather than any blob.
+    let staged = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "--stage", "dir/source", "source-link"])
+        .output()
+        .unwrap();
+    assert!(staged.status.success());
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    let mut index = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["update-index", "--index-info"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let mut input = index.stdin.take().unwrap();
+        for line in staged.lines() {
+            let (fields, path) = line.split_once('\t').unwrap();
+            let mut fields = fields.split_whitespace();
+            let mode = fields.next().unwrap();
+            let hash = fields.next().unwrap();
+            writeln!(input, "0 {hash}\t{path}").unwrap();
+            for stage in 1..=3 {
+                writeln!(input, "{mode} {hash} {stage}\t{path}").unwrap();
+            }
+        }
+    }
+    assert!(index.wait().unwrap().success());
     fs::write(root.join("dir/source"), "dirty").unwrap();
     fs::remove_file(root.join("deleted")).unwrap();
     fs::create_dir(root.join("target")).unwrap();
@@ -173,7 +205,7 @@ fn snapshots_capture_dirty_files_preserve_metadata_and_confine_symlinks() {
     snapshot(&root, &frozen).unwrap();
     fs::write(root.join("dir/source"), "later edit").unwrap();
     let mut nix = TestNix::default();
-    let result = prepare(&mut nix, &frozen, &repos.path("prepared"), true).unwrap();
+    let result = prepare(&mut nix, &frozen, &repos.path("prepared"), true, false).unwrap();
     let prepared = &result.sources[&frozen];
     assert_eq!(result.flake, format!("path:{}", prepared.display()));
     assert_eq!(
@@ -348,12 +380,12 @@ fn graph_cycles_collisions_and_existing_destinations_fail_closed() {
     repos.repository("b", json!({"a":{"url":"git+file:../a"}}), &[]);
     let mut nix = TestNix::default();
     error_contains(
-        prepare(&mut nix, &a, &repos.path("cycle"), false),
+        prepare(&mut nix, &a, &repos.path("cycle"), false, false),
         "local input cycle",
     );
     assert!(nix.locks.is_empty());
     error_contains(
-        prepare(&mut nix, &a, &repos.path("cycle"), false),
+        prepare(&mut nix, &a, &repos.path("cycle"), false, false),
         "already exists",
     );
     let root = repos.repository(
@@ -364,7 +396,7 @@ fn graph_cycles_collisions_and_existing_destinations_fail_closed() {
     repos.repository("x/shared", json!({}), &[]);
     repos.repository("y/shared", json!({}), &[]);
     error_contains(
-        prepare(&mut nix, &root, &repos.path("collision"), false),
+        prepare(&mut nix, &root, &repos.path("collision"), false, false),
         "basename collision",
     );
     assert!(nix.locks.is_empty());

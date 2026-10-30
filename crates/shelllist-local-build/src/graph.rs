@@ -47,18 +47,9 @@ pub(crate) struct Prepared {
     pub original_root: Option<PathBuf>,
 }
 
-pub(crate) fn prepare(
-    nix: &mut impl Nix,
-    root: &Path,
-    destination: &Path,
-    root_is_snapshot: bool,
-) -> Result<Prepared> {
-    prepare_with_capture(nix, root, destination, root_is_snapshot, false)
-}
-
 /// Optionally retain the exact captured root before disposable lock resolution.
 /// Approval consumers must never reconstruct that identity from a live checkout.
-pub(crate) fn prepare_with_capture(
+pub(crate) fn prepare(
     nix: &mut impl Nix,
     root: &Path,
     destination: &Path,

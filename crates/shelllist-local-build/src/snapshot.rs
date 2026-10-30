@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     ffi::OsStr,
     fs::{self, File, FileTimes, Metadata},
     io,
@@ -78,11 +77,10 @@ pub(crate) fn validate_worktree(root: &Path) -> Result<()> {
 pub(crate) fn snapshot(root: &Path, destination: &Path) -> Result<()> {
     validate_worktree(root)?;
     fs::create_dir_all(destination)?;
-    let files = git(root, &["ls-files", "--cached", "-z"])?;
+    let files = git(root, &["ls-files", "--cached", "--deduplicate", "-z"])?;
     for entry in files
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
-        .collect::<BTreeSet<_>>()
     {
         let relative = Path::new(OsStr::from_bytes(entry));
         let source = root.join(relative);

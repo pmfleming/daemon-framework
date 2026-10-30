@@ -3,13 +3,7 @@ use std::{ffi::OsString, os::unix::ffi::OsStrExt, path::PathBuf, process::Comman
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
 
-use crate::{
-    command::run,
-    graph::{prepare, prepare_with_capture},
-    lock::prune_file,
-    nix::Nix,
-    preflight::preflight,
-};
+use crate::{command::run, graph::prepare, lock::prune_file, nix::Nix, preflight::preflight};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -73,7 +67,7 @@ impl Cli {
                 destination,
                 root_is_snapshot,
                 capture_root,
-            } => print_report(prepare_with_capture(
+            } => print_report(prepare(
                 nix,
                 &root,
                 &destination,
@@ -137,7 +131,7 @@ impl Invocation {
         let (root, args) = self.parts()?;
         validate_args(args)?;
         let temporary = tempfile::Builder::new().prefix("local-build-").tempdir()?;
-        let prepared = prepare(nix, root, &temporary.path().join("sources"), false)?;
+        let prepared = prepare(nix, root, &temporary.path().join("sources"), false, false)?;
         eprintln!("{}", serde_json::to_string_pretty(&prepared)?);
         let installable = match attr {
             Some(attr) => format!("{}#{attr}", prepared.flake),
