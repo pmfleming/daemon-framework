@@ -1,13 +1,25 @@
-use super::*;
+use super::{
+    JsonlListener, JsonlSocketConfig, LocalJsonlService, NEXT_OWNER, SocketSession, new_owner,
+    writer,
+};
+use crate::transport_tests::{route as client_route, within_seconds};
 use crate::{BasicCorrelation, ServiceBoundary};
+use anyhow::Result;
+use serde_json::{Value, json};
+use shelllist_daemon_core::RouteKind;
 use std::{
     collections::HashMap,
     fs,
     os::unix::fs::{PermissionsExt, symlink},
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
     sync::{Notify, oneshot},
 };
 
@@ -193,11 +205,7 @@ impl Running {
     }
     async fn finish(self) {
         let _ = self.stop.send(());
-        tokio::time::timeout(Duration::from_secs(3), self.task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        within_seconds(3, self.task).await.unwrap().unwrap();
         assert!(!self.path.exists());
         drop(self.directory);
     }
@@ -214,21 +222,19 @@ async fn next(stream: &mut BufReader<UnixStream>) -> Value {
 }
 async fn next_with_bytes(stream: &mut BufReader<UnixStream>) -> (Value, usize) {
     let mut line = String::new();
-    let bytes = tokio::time::timeout(Duration::from_secs(3), stream.read_line(&mut line))
+    let bytes = within_seconds(3, stream.read_line(&mut line))
         .await
-        .unwrap()
         .unwrap();
     assert!(bytes > 0);
     (serde_json::from_str(&line).unwrap(), bytes)
 }
 async fn until(mut predicate: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    within_seconds(3, async {
         while !predicate() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
-    .await
-    .unwrap();
+    .await;
 }
 mod qualification;
 
@@ -244,71 +250,64 @@ fn owner_identities_have_fresh_entropy_not_just_a_pid_and_counter() {
     assert!(a.starts_with("unix:") && b.starts_with("unix:"));
 }
 
-#[tokio::test]
-async fn pre_ack_overflow_closes_connection_instead_of_losing_a_baseline() {
-    let running = Running::start(JsonlSocketConfig {
-        pending_event_limit: 1,
-        ..Default::default()
-    })
-    .await;
-    let mut client = BufReader::new(UnixStream::connect(&running.path).await.unwrap());
-    send(
-        &mut client,
-        json!({"id":"sub","op":"subscribe","streams":["burst-preack"]}),
-    )
-    .await;
-    tokio::time::timeout(Duration::from_secs(3), running.service.entered.notified())
-        .await
-        .unwrap();
-    until(|| running.service.disconnects.load(Ordering::SeqCst) > 0).await;
-    assert_eq!(next(&mut client).await["kind"], "transport-error");
-    let mut line = String::new();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(3), client.read_line(&mut line))
-            .await
-            .unwrap()
-            .unwrap(),
-        0
-    );
-    assert!(running.service.resources.lock().unwrap().is_empty());
-    running.service.release.notify_one();
-    running.finish().await;
-}
-
 #[tokio::test(flavor = "current_thread")]
-async fn synchronous_event_overflow_retires_only_its_owner_without_blocking_the_executor() {
-    let running = Running::start(JsonlSocketConfig::default()).await;
-    let mut slow = BufReader::new(UnixStream::connect(&running.path).await.unwrap());
-    let mut peer = BufReader::new(UnixStream::connect(&running.path).await.unwrap());
-    send(
-        &mut slow,
-        json!({"id":"burst","op":"call","method":"burst-sync","params":{}}),
-    )
-    .await;
-    tokio::time::timeout(Duration::from_secs(3), running.service.completed.notified())
-        .await
-        .unwrap();
-    until(|| running.service.disconnects.load(Ordering::SeqCst) > 0).await;
-    assert!(running.service.resources.lock().unwrap().is_empty());
-    // A real EOF, not merely an internal closed flag or a synthetic transport.
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let mut line = String::new();
-            if slow.read_line(&mut line).await.unwrap() == 0 {
-                break;
-            }
+async fn event_overflows_retire_only_their_owner_and_keep_peers_responsive() {
+    for pre_ack in [true, false] {
+        let server = Running::start(JsonlSocketConfig {
+            pending_event_limit: if pre_ack { 1 } else { 32 },
+            ..Default::default()
+        })
+        .await;
+        let mut client = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
+        let mut peer = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
+        let (request, completed) = if pre_ack {
+            (
+                json!({"id":"sub","op":"subscribe","streams":["burst-preack"]}),
+                &server.service.entered,
+            )
+        } else {
+            (
+                json!({"id":"burst","op":"call","method":"burst-sync","params":{}}),
+                &server.service.completed,
+            )
+        };
+        send(&mut client, request).await;
+        within_seconds(3, completed.notified()).await;
+        until(|| server.service.disconnects.load(Ordering::SeqCst) > 0).await;
+        assert!(server.service.resources.lock().unwrap().is_empty());
+        if pre_ack {
+            assert_eq!(next(&mut client).await["kind"], "transport-error");
+            server.service.release.notify_one();
         }
-    })
-    .await
-    .unwrap();
-    send(
-        &mut peer,
-        json!({"id":"peer","op":"call","method":"echo","params":{"live":true}}),
-    )
-    .await;
-    assert_eq!(next(&mut peer).await["response"]["live"], true);
-    drop(peer);
-    running.finish().await;
+        // Real EOF in both scenarios; no event may follow the pre-ack error.
+        within_seconds(3, async {
+            loop {
+                let mut line = String::new();
+                if client.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                assert!(!pre_ack, "unexpected output after transport error");
+            }
+        })
+        .await;
+        // Accepted work can finish late; wait for its actual admission release.
+        until(|| {
+            server
+                .service
+                .boundary
+                .call(Some(":probe"), "echo", "{}")
+                .is_ok()
+        })
+        .await;
+        send(
+            &mut peer,
+            json!({"id":"peer","op":"call","method":"echo","params":{"live":true}}),
+        )
+        .await;
+        assert_eq!(next(&mut peer).await["response"]["live"], true);
+        drop(peer);
+        server.finish().await;
+    }
 }
 
 #[tokio::test]
@@ -345,38 +344,37 @@ async fn routes_early_events_release_and_connection_ownership() {
     let server = Running::start(JsonlSocketConfig::default()).await;
     let mut a = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
     let mut b = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
-    let call_route = json!({"consumerId":"view","localId":"read","generation":2,"kind":"call"});
+    let call_route = client_route("view", 2, RouteKind::Call);
     send(
         &mut a,
         json!({"op":"call","id":"read","method":"echo","params":{"live":true},"route":call_route}),
     )
     .await;
     let response = next(&mut a).await;
-    assert_eq!(response["route"], call_route);
+    assert_eq!(response["route"], json!(call_route));
     assert_eq!(response["response"]["live"], true);
-    let route = json!({"consumerId":"view","localId":"sub","generation":2,"kind":"subscription"});
+    let route = client_route("view", 2, RouteKind::Subscription);
     send(
         &mut a,
         json!({"op":"subscribe","id":"sub","streams":["test.changed"],"route":route}),
     )
     .await;
     let ack = next(&mut a).await;
-    assert_eq!(ack["route"], route);
+    assert_eq!(ack["route"], json!(route));
     let id = ack["response"]["data"]["subscription"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
     let event = next(&mut a).await;
-    assert_eq!(event["route"], route);
-    let control_route =
-        json!({"consumerId":"view","localId":"foreign","generation":2,"kind":"control"});
+    assert_eq!(event["route"], json!(route));
+    let control_route = client_route("view", 2, RouteKind::Control);
     send(
         &mut b,
         json!({"op":"cancel","id":"foreign","request_id":id,"route":control_route}),
     )
     .await;
     let response = next(&mut b).await;
-    assert_eq!(response["route"], control_route);
+    assert_eq!(response["route"], json!(control_route));
     assert_eq!(response["response"]["ok"], false);
     send(&mut a,json!({"op":"release","id":"release","route":{"consumerId":"view","localId":"release","generation":2,"kind":"control"}})).await;
     assert_eq!(next(&mut a).await["response"]["released"], 1);
@@ -406,9 +404,7 @@ async fn saturated_requests_leave_controls_available_and_shutdown_drains_accepte
         json!({"op":"call","id":"held","method":"hold"}),
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(3), server.service.entered.notified())
-        .await
-        .unwrap();
+    within_seconds(3, server.service.entered.notified()).await;
     for request in [
         json!({"op":"call","id":"rejected","method":"echo"}),
         json!({"op":"subscribe","id":"rejected","streams":[]}),
@@ -449,7 +445,7 @@ async fn deadlines_do_not_abort_effects_or_free_shared_admission_and_late_work_i
     })
     .await;
     let mut a = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
-    let route = json!({"consumerId":"view","localId":"effect","generation":2,"kind":"call"});
+    let route = client_route("view", 2, RouteKind::Call);
     send(
         &mut a,
         json!({"op":"call","id":"effect","method":"hold","route":route}),
@@ -457,7 +453,7 @@ async fn deadlines_do_not_abort_effects_or_free_shared_admission_and_late_work_i
     .await;
     server.service.entered.notified().await;
     let response = next(&mut a).await;
-    assert_eq!(response["route"], route);
+    assert_eq!(response["route"], json!(route));
     assert_eq!(response["outcome"], "outcome-unknown");
     assert!(
         server

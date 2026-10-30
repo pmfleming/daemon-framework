@@ -1,17 +1,9 @@
+use crate::transport_tests::route;
 use anyhow::Result;
 use serde_json::{Value, json};
 use shelllist_daemon_core::{ClientRoute, RouteKind};
 
 use super::{BasicCorrelation, CorrelationPolicy, OutputCommand, OutputState, emit_command};
-
-fn route(consumer: &str, generation: u64, kind: RouteKind) -> ClientRoute {
-    ClientRoute {
-        consumer_id: consumer.into(),
-        local_id: "same-local-id".into(),
-        generation,
-        kind,
-    }
-}
 
 fn subscription(id: &str, owner: impl Into<Option<ClientRoute>>) -> OutputCommand {
     OutputCommand::Response {

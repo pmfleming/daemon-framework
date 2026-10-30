@@ -1,7 +1,7 @@
 //! Isolated real-bus tests; never change the process session-bus environment.
 use futures::StreamExt;
 use serde_json::json;
-use shelllist_daemon_core::{ApiIdentity, Correlation, DaemonEndpoint};
+use shelllist_daemon_core::{ApiIdentity, ClientRoute, Correlation, DaemonEndpoint, RouteKind};
 use std::{
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
@@ -16,6 +16,16 @@ pub(crate) async fn within_seconds<T>(
     tokio::time::timeout(Duration::from_secs(seconds), future)
         .await
         .expect("test operation exceeded its deadline")
+}
+
+/// Deliberately repeat local IDs across consumers to exercise route isolation.
+pub(crate) fn route(consumer: &str, generation: u64, kind: RouteKind) -> ClientRoute {
+    ClientRoute {
+        consumer_id: consumer.into(),
+        local_id: "same-local-id".into(),
+        generation,
+        kind,
+    }
 }
 
 pub(crate) struct Bus {

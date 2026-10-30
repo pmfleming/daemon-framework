@@ -140,3 +140,126 @@ assertions. The expanded owner passes before and after the refactor. These are
 vector counts, not 1,028 distinct behaviors or a numeric branch-coverage claim.
 Core crate **12 library + 1 generator tests pass**, zero doctests; strict all-target
 Clippy, formatting and diff checks pass. Raw logs: `stage5-{before-tests,tests,clippy}.log`.
+
+## Stage 6: test ownership and consolidation
+
+Replace two native overflow tests with one owner enumerating pre-ack and
+synchronous overflow. Both original scenarios passed in the baseline and stages
+1–3. The shared owner retains the pre-ack transport-error assertion, rejects any
+later pre-ack output, requires actual EOF, verifies resource cleanup and executes
+on a single runtime thread. The synchronous producer still asserts closed state
+internally. Both scenarios now demonstrate a healthy peer after accepted work
+actually releases admission; late pre-ack work is explicitly released.
+
+Reuse the existing successful-deadline helper, retaining all three-second bounds
+and explicit expected-timeout assertions. Consolidate six invalid-workload vectors
+under their existing owner; keep separate zero/65-owner and 64-owner aggregate
+budget cases. No guard vector is dropped. Move the existing typed route fixture
+to shared transport test support and reuse it in actor/native tests; repeated local
+IDs deliberately exercise isolation. This replaces repeated valid JSON route
+construction; malformed wire vectors remain literal. Replace all remaining test
+wildcard imports, including the two outside RQLens's default source-root inventory.
+
+Stage-local Tokio suite: **42 passed, 1 ignored**. Final workspace validation and
+comparable measurements below include the shared route-fixture follow-up too.
+
+## Comparable baseline/final evidence
+
+Same evaluator binary/config/helper inputs: v7 fingerprints are complete, config
+digest `2cc64ebfc70637d7`, helper digest `896ede594acf7592`. All six focused producers
+exit zero. This is not `rqlens enforce` or a complete-policy pass.
+
+Production function records exclude test directories/files and `tests`,
+`test_support`, `*_tests` namespaces. Physical Rust LOC uses all 58 tracked Rust
+files, separating test directories, `tests.rs`/`*_tests.rs` and trailing inline
+test modules. Module declarations remain with their file prefix. Counts include
+comments/blanks; they are distinct from RQLens function SLOC and nonblank clone
+scope. Architecture means include all 56 inventoried modules, including tests.
+
+| Metric | Baseline | Final |
+| --- | ---: | ---: |
+| Production cognitive sum / max | 472 / 38 | 448 / 13 |
+| Production cyclomatic sum / max | 1,148 / 21 | 1,144 / 17 |
+| Production function Halstead effort sum | 2,817,844.69 | 2,780,719.21 |
+| Maximum production function effort | 175,991.80 | 108,574.21 |
+| Production function SLOC | 4,529 | 4,552 |
+| Maximum production hotspot score | 242.82 | 112.67 |
+| Production / test physical Rust LOC | 6,609 / 4,727 | 6,622 / 4,846 |
+| Total physical Rust LOC | 11,336 | 11,468 |
+| Named test cases / ignored | 74 / 1 | 74 / 1 |
+| Duplicated lines / percentage | 141 / 1.45% | 150 / 1.52% |
+| Explicit `.clone()` sites, production / all | 48 / 82 | 46 / 80 |
+| Measured escape-hatch records | 3 | 0 |
+| Production reliability findings | 0 | 0 |
+| Mean module leverage / locality | 22.500 / 98.621 | 24.107 / 98.286 |
+| LLVM covered / instrumented lines | 4,446 / 5,355 | 4,498 / 5,395 |
+| LLVM line coverage | 83.03% | 83.37% |
+| LLVM function coverage | 77.29% | 77.46% |
+
+`connection` cognitive complexity falls **38 → 13**, cyclomatic **21 → 14**;
+decimal decomposition falls **9 → 7** cognitive and **7 → 6** cyclomatic.
+The extracted socket execution function owns real accepted-work/reply policy;
+the removed local-build forwarding function offsets its function count.
+
+Tradeoffs: **the total LOC and duplication objectives are not achieved**. Stage 6
+removes 12 physical test lines net and combines two case owners without dropping
+either overflow scenario, but the campaign adds 119 test lines and 13 production
+lines overall. New saturation/drain, invalid-route, addressed-timeout, conflicted
+index and numeric vectors outweigh consolidation. Repeated native traffic setup
+and small independent error-format implementations remain clone candidates; they
+are not forced into wrappers to lower the score. Shared test ownership increases
+measured reuse and cross-module dependencies: locality falls **0.335 points**.
+The 1.32% effort-sum reduction is a syntax metric, not measured developer time or
+runtime performance. Actual common-path route/string copies are removed despite
+the clone-site metric's spelling limitation described in stage 3.
+
+## Final validation and limits
+
+In the cached repository Nix development environment, with `CARGO_BUILD_JOBS=2`:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+git diff --check
+```
+
+All pass: **73 tests passed, 1 ignored**, zero failed; doctests have zero examples.
+Final logs: `target/quality-campaign/final-{fmt,clippy,tests}.log`.
+
+Coverage uses the existing lens Nix environment, also Rust 1.95.0:
+
+```sh
+source /home/laufan/Projects/rust-quality-lens/.direnv/flake-profile-*.rc
+export CARGO_BUILD_JOBS=2
+cargo llvm-cov --workspace --locked --json \
+  --output-path target/quality-campaign/final-coverage.json
+```
+
+Baseline uses the identical command with `baseline-coverage.json`. Both runs pass
+73 tests, ignore the same profiling test, and report 42 instrumented files.
+Coverage includes inline test code and is **not production-only coverage**.
+Branch and MC/DC coverage are not measured. Exact decimal vectors and the snapshot
+negative control are behavioral/sensitivity evidence, not coverage percentages.
+
+Snapshot-based Nix gate command:
+
+```sh
+CARGO_BUILD_JOBS=2 NIX_BUILD_CORES=2 \
+  tools/local-build check . --keep-going --max-jobs 1 --cores 2
+```
+
+**All three checks pass**, including the current-source rerun after the shared
+route-fixture follow-up. Log: `target/quality-campaign/final-nix-check.log`.
+
+Limitations: native syntax evidence remains **partial** because a test invocation
+of `declare_methods!` is unexpanded; semantic architecture leaves **13 references
+unresolved** in both runs. Complete input fingerprints do not cure those limits.
+Only the six listed lens producers were run. Optional mutation/feature-matrix,
+live compositor and external consumer gates were not run. The explicit snapshot
+negative control is not a general mutation-testing score. No safely removable
+public production API was established; removed preparation indirection was private
+to the CLI binary. Manifests, dependencies, locks, public signatures and protocol
+fixtures are unchanged. Rust 1.95 is validated; the pre-existing advertised 1.85
+MSRV is not validated. Raw reports remain ignored; the final commit's source is
+remeasured after commit so artifact fingerprints identify the completed head.

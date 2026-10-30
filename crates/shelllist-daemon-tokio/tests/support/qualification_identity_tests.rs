@@ -1,7 +1,11 @@
 //! Private provenance vectors; no host repository/config mutation or children
 //! with descendants. The shell cases use builtins only and retain no output.
-use super::*;
+use super::{
+    binary_identity, hash_field, identity_command, memory_snapshot, output, parse_memory, sha256,
+    source_identity, start_ticks,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{path::Path, process::Command, time::Duration};
 
 struct Fixture(std::path::PathBuf);
 impl Fixture {

@@ -451,7 +451,8 @@ mod identity_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Traffic, Workload, distribution, parse_memory, sha256};
+    use std::time::Duration;
     #[test]
     fn percentiles_memory_and_bounds_are_explicit() {
         assert_eq!(distribution(&mut [1, 2, 3, 4]).unwrap()["p50_ns"], 2);
@@ -488,54 +489,34 @@ mod tests {
         };
         assert!(workload.validate(0).is_err());
         assert!(workload.validate(65).is_err());
-        assert!(
+        for invalid in [
             Workload {
                 payload_bytes: 16 * 1024 * 1024 + 1,
                 ..workload
-            }
-            .validate(1)
-            .is_err()
-        );
-        assert!(
+            },
             Workload {
                 step_deadline: Duration::ZERO,
                 ..workload
-            }
-            .validate(1)
-            .is_err()
-        );
-        assert!(
+            },
             Workload {
                 total_deadline: Duration::MAX,
                 ..workload
-            }
-            .validate(1)
-            .is_err()
-        );
-        assert!(
+            },
             Workload {
                 step_deadline: Duration::from_secs(1801),
                 ..workload
-            }
-            .validate(1)
-            .is_err()
-        );
-        assert!(
+            },
             Workload {
                 sample_cycles: usize::MAX,
                 ..workload
-            }
-            .validate(1)
-            .is_err()
-        );
-        assert!(
+            },
             Workload {
                 sample_cycles: 0,
                 ..workload
-            }
-            .validate(1)
-            .is_err()
-        );
+            },
+        ] {
+            assert!(invalid.validate(1).is_err());
+        }
         assert!(
             Workload {
                 sample_cycles: 10_000,
