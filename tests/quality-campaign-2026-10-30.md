@@ -95,3 +95,17 @@ successful Unicode traffic. That proves invalid input did not consume admission.
 `cargo test -p shelllist-daemon-tokio --locked`: **43 passed, 1 ignored**;
 doctests have zero examples. Crate/all-target strict Clippy and formatting pass.
 Logs: `target/quality-campaign/stage2-{tests,clippy}.log`.
+
+## Stage 3: route ownership
+
+Only Release clones a route for detached dispatch. Calls, Subscribe and Cancel
+avoid copying both route strings; their original address stays with the reply
+waiter, including timeout/error responses. Release retains the same clone and
+owner/generation query. A syntactic `.clone()` count understates that retained
+Release cost because the implementation now uses `.cloned()`.
+
+Extended existing native tests assert addressed call success, addressed foreign
+cancellation rejection (despite equal consumer/generation metadata), and addressed
+effect timeout. Existing early-event/release and late-effect cleanup assertions
+remain. Selected native tests **16 passed**; crate/all-target strict Clippy,
+formatting and diff checks pass. Logs: `stage3-{tests,clippy}.log` in the raw directory.

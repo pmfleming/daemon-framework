@@ -334,7 +334,12 @@ async fn execute_request<S: LocalJsonlService>(
     let id = request_id(&request).to_owned();
     let control = !matches!(request, ClientRequest::Call { .. });
     let work_session = session.clone();
-    let work_route = route.clone();
+    // Only Release reads routing metadata during dispatch. Keep the original
+    // address with the waiter so success and timeout replies remain addressed.
+    let work_route = route
+        .as_ref()
+        .filter(|_| matches!(request, ClientRequest::Release { .. }))
+        .cloned();
     // Dropping a JoinHandle detaches; it never claims effects rolled back.
     let mut work = tokio::spawn(async move {
         let _permit = permit;

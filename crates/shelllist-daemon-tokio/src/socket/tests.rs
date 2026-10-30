@@ -345,6 +345,15 @@ async fn routes_early_events_release_and_connection_ownership() {
     let server = Running::start(JsonlSocketConfig::default()).await;
     let mut a = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
     let mut b = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
+    let call_route = json!({"consumerId":"view","localId":"read","generation":2,"kind":"call"});
+    send(
+        &mut a,
+        json!({"op":"call","id":"read","method":"echo","params":{"live":true},"route":call_route}),
+    )
+    .await;
+    let response = next(&mut a).await;
+    assert_eq!(response["route"], call_route);
+    assert_eq!(response["response"]["live"], true);
     let route = json!({"consumerId":"view","localId":"sub","generation":2,"kind":"subscription"});
     send(
         &mut a,
@@ -359,12 +368,16 @@ async fn routes_early_events_release_and_connection_ownership() {
         .to_owned();
     let event = next(&mut a).await;
     assert_eq!(event["route"], route);
+    let control_route =
+        json!({"consumerId":"view","localId":"foreign","generation":2,"kind":"control"});
     send(
         &mut b,
-        json!({"op":"cancel","id":"foreign","request_id":id}),
+        json!({"op":"cancel","id":"foreign","request_id":id,"route":control_route}),
     )
     .await;
-    assert_eq!(next(&mut b).await["response"]["ok"], false);
+    let response = next(&mut b).await;
+    assert_eq!(response["route"], control_route);
+    assert_eq!(response["response"]["ok"], false);
     send(&mut a,json!({"op":"release","id":"release","route":{"consumerId":"view","localId":"release","generation":2,"kind":"control"}})).await;
     assert_eq!(next(&mut a).await["response"]["released"], 1);
     assert!(server.service.resources.lock().unwrap().is_empty());
@@ -436,9 +449,16 @@ async fn deadlines_do_not_abort_effects_or_free_shared_admission_and_late_work_i
     })
     .await;
     let mut a = BufReader::new(UnixStream::connect(&server.path).await.unwrap());
-    send(&mut a, json!({"op":"call","id":"effect","method":"hold"})).await;
+    let route = json!({"consumerId":"view","localId":"effect","generation":2,"kind":"call"});
+    send(
+        &mut a,
+        json!({"op":"call","id":"effect","method":"hold","route":route}),
+    )
+    .await;
     server.service.entered.notified().await;
-    assert_eq!(next(&mut a).await["outcome"], "outcome-unknown");
+    let response = next(&mut a).await;
+    assert_eq!(response["route"], route);
+    assert_eq!(response["outcome"], "outcome-unknown");
     assert!(
         server
             .service
