@@ -14,6 +14,7 @@ mod operation;
 mod protocol;
 pub mod watch;
 pub mod wire;
+pub mod workspace_wire;
 pub use operation::{
     OperationAdmissionError, OperationLimits, OwnedOperation, OwnedOperations, RecentResults,
 };

@@ -3,6 +3,7 @@ pub mod preferences;
 pub mod work_area;
 #[cfg(test)]
 mod work_area_tests;
+pub mod workspace;
 
 use std::{
     env,
