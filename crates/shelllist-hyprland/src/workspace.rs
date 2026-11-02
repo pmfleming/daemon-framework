@@ -88,6 +88,29 @@ pub fn guarded_close(address: &str, pid: u32, workspace: i64) -> Result<String> 
     ))
 }
 
+pub fn focus_window(address: &str, pid: u32, workspace: i64) -> Result<String> {
+    let guard = window_guard(address, pid, workspace)?;
+    Ok(format!(
+        "{guard} local r=hl.dispatch(hl.dsp.focus({{window=w}})); assert(r.ok,r.error)"
+    ))
+}
+
+/// Follow a launch only while the invoking monitor and workspace still own focus.
+pub fn follow_window(
+    address: &str,
+    pid: u32,
+    workspace: i64,
+    monitor: &str,
+    origin: i64,
+) -> Result<String> {
+    ensure!(origin > 0, "invalid origin");
+    let monitor = quote(monitor)?;
+    let focus = focus_window(address, pid, workspace)?;
+    Ok(format!(
+        "local m=hl.get_active_monitor(); assert(m and m.name=={monitor} and m.active_workspace and m.active_workspace.id=={origin},'focus intent expired'); {focus}"
+    ))
+}
+
 /// Pin a weak compositor window reference; unlike an address it cannot identify
 /// a subsequently allocated window from the same process. The caller owns token
 /// quotas, lifetime and journal admission. This table contains no routing policy.
@@ -153,6 +176,22 @@ pub fn guarded_move(address: &str, pid: u32, source: i64, destination: i64) -> R
     let guard = window_guard(address, pid, source)?;
     Ok(format!(
         "{guard} local r=hl.dispatch(hl.dsp.window.move({{window=w,workspace={destination},follow=false}})); assert(r.ok,r.error)"
+    ))
+}
+
+/// Materialize and populate a reserved destination in one compositor turn, before
+/// an empty background workspace can be reclaimed. Restore prior focus afterward.
+pub fn move_local(
+    address: &str,
+    pid: u32,
+    source: i64,
+    destination: i64,
+    monitor: &str,
+) -> Result<String> {
+    let movement = guarded_move(address, pid, source, destination)?;
+    let monitor = quote(monitor)?;
+    Ok(format!(
+        "local m=hl.get_monitor({monitor}); assert(m,'monitor disappeared'); local target=hl.get_workspace({destination}); assert(not target or target.monitor==m,'foreign destination'); local previous=hl.get_active_monitor(); local active=hl.get_active_window(); local r=hl.dispatch(hl.dsp.focus({{monitor=m}})); assert(r.ok,r.error); {movement}; if previous then r=hl.dispatch(hl.dsp.focus({{monitor=previous}})); assert(r.ok,r.error) end; if active and active.mapped then r=hl.dispatch(hl.dsp.focus({{window=active}})); assert(r.ok,r.error) end"
     ))
 }
 

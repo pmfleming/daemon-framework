@@ -194,7 +194,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     .unwrap();
     workspace::execute(
         &client,
-        &workspace::guarded_move(&target.address, target.pid, 6, 7).unwrap(),
+        &workspace::move_local(&target.address, target.pid, 6, 7, &monitor.name).unwrap(),
     )
     .await
     .unwrap();
