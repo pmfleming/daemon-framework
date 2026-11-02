@@ -49,7 +49,41 @@ pub async fn snapshot(client: &Client) -> Result<Snapshot> {
     let reply = client
         .request_exact("[[BATCH]]j/monitors;j/workspaces;j/clients")
         .await?;
-    let mut parts = serde_json::Deserializer::from_str(&reply);
+    parse_snapshot(session, &reply)
+}
+
+/// Capture weak window identities in the same compositor turn as their JSON
+/// snapshot. An address reused after this turn cannot satisfy close_pinned.
+pub async fn pinned_snapshot(
+    client: &Client,
+    monitor: &str,
+    workspace: i64,
+    prefix: &str,
+) -> Result<Snapshot> {
+    ensure!(workspace > 0, "ordinary workspace required");
+    let session = client
+        .instance_signature()?
+        .context("compositor session required")?
+        .to_owned();
+    let prefix = token_literal(prefix)?;
+    let monitor = quote(monitor)?;
+    // No semicolons inside the expression: the IPC batch delimiter is ';'.
+    let expression = format!(
+        "local m=hl.get_monitor({monitor}) assert(m and m.active_workspace and m.active_workspace.id=={workspace},'stale monitor') local targets=hl.get_windows({{workspace={workspace}}}) assert(#targets<=512,'too many windows') __shelllist_window_refs=__shelllist_window_refs or {{}} for _,w in ipairs(targets) do local key={prefix}..'-'..w.address assert(__shelllist_window_refs[key]==nil,'duplicate token') __shelllist_window_refs[key]=w end"
+    );
+    let reply = client
+        .request_exact(&format!(
+            "[[BATCH]]eval {expression};j/monitors;j/workspaces;j/clients"
+        ))
+        .await?;
+    let json = reply
+        .strip_prefix("ok")
+        .context("compositor did not pin close snapshot")?;
+    parse_snapshot(session, json)
+}
+
+fn parse_snapshot(session: String, reply: &str) -> Result<Snapshot> {
+    let mut parts = serde_json::Deserializer::from_str(reply);
     let monitors = Deserialize::deserialize(&mut parts)?;
     let workspaces = Deserialize::deserialize(&mut parts)?;
     let windows = Deserialize::deserialize(&mut parts)?;
@@ -191,7 +225,7 @@ pub fn move_local(
     let movement = guarded_move(address, pid, source, destination)?;
     let monitor = quote(monitor)?;
     Ok(format!(
-        "local m=hl.get_monitor({monitor}); assert(m,'monitor disappeared'); local target=hl.get_workspace({destination}); assert(not target or target.monitor==m,'foreign destination'); local previous=hl.get_active_monitor(); local active=hl.get_active_window(); local r=hl.dispatch(hl.dsp.focus({{monitor=m}})); assert(r.ok,r.error); {movement}; if previous then r=hl.dispatch(hl.dsp.focus({{monitor=previous}})); assert(r.ok,r.error) end; if active and active.mapped then r=hl.dispatch(hl.dsp.focus({{window=active}})); assert(r.ok,r.error) end"
+        "local m=hl.get_monitor({monitor}); assert(m,'monitor disappeared'); local target=hl.get_workspace({destination}); assert(not target or target.monitor==m,'foreign destination'); local previous=hl.get_active_monitor(); local active=hl.get_active_window(); local r=hl.dispatch(hl.dsp.focus({{monitor=m}})); assert(r.ok,r.error); {movement}; if previous then r=hl.dispatch(hl.dsp.focus({{monitor=previous}})); assert(r.ok,r.error) end; if active and active~=w and active.mapped then r=hl.dispatch(hl.dsp.focus({{window=active}})); assert(r.ok,r.error) end"
     ))
 }
 

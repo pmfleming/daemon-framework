@@ -186,22 +186,39 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     }
     let target = target.expect("test window did not map");
     assert_eq!(target.workspace.id, 6);
-    workspace::execute(
-        &client,
-        &workspace::pin_window("probe-1", &target.address, target.pid, 6).unwrap(),
-    )
-    .await
-    .unwrap();
+    let pinned = workspace::pinned_snapshot(&client, &monitor.name, 6, "probe-1")
+        .await
+        .unwrap();
+    assert!(
+        pinned
+            .windows
+            .iter()
+            .any(|window| window.address == target.address)
+    );
+    let token = format!("probe-1-{}", target.address);
     workspace::execute(
         &client,
         &workspace::move_local(&target.address, target.pid, 6, 7, &monitor.name).unwrap(),
     )
     .await
     .unwrap();
+    assert_eq!(
+        workspace::snapshot(&client)
+            .await
+            .unwrap()
+            .monitors
+            .iter()
+            .find(|m| m.focused)
+            .unwrap()
+            .active_workspace
+            .id,
+        6,
+        "silent placement must not follow the moved active window"
+    );
     assert!(
         workspace::execute(
             &client,
-            &workspace::close_pinned("probe-1", &target.address, target.pid, 6).unwrap()
+            &workspace::close_pinned(&token, &target.address, target.pid, 6).unwrap()
         )
         .await
         .is_err()
@@ -209,7 +226,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     assert!(app.0.try_wait().unwrap().is_none());
     workspace::execute(
         &client,
-        &workspace::close_pinned("probe-1", &target.address, target.pid, 7).unwrap(),
+        &workspace::close_pinned(&token, &target.address, target.pid, 7).unwrap(),
     )
     .await
     .unwrap();
@@ -225,7 +242,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     assert!(
         workspace::execute(
             &client,
-            &workspace::close_pinned("probe-1", &target.address, target.pid, 7).unwrap()
+            &workspace::close_pinned(&token, &target.address, target.pid, 7).unwrap()
         )
         .await
         .is_err()
