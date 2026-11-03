@@ -14,7 +14,7 @@ pub struct JsonlListener {
     path: PathBuf,
     identity: (u64, u64),
     // Never unlink the lock: replacing its inode would permit a second binder.
-    _lock: File,
+    lock: File,
 }
 impl JsonlListener {
     pub fn path(&self) -> &Path {
@@ -28,6 +28,10 @@ impl Drop for JsonlListener {
         {
             let _ = fs::remove_file(&self.path);
         }
+        // Closing our descriptor alone does not release flock if a concurrent
+        // fork inherited the same open file description and has not exec'd yet.
+        // Release ownership after path cleanup, without unlinking the lock inode.
+        let _ = flock(&self.lock, FlockOperation::Unlock);
     }
 }
 pub(super) async fn bind(runtime: &Path, name: &str) -> Result<JsonlListener> {
@@ -90,8 +94,35 @@ pub(super) async fn bind(runtime: &Path, name: &str) -> Result<JsonlListener> {
         path,
         identity: (meta.dev(), meta.ino()),
         uid,
-        _lock: lock,
+        lock,
     };
     fs::set_permissions(owned.path(), fs::Permissions::from_mode(0o700))?;
     Ok(owned)
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn shutdown_releases_lock_even_with_an_inherited_descriptor() {
+    use std::sync::atomic::Ordering;
+
+    let directory = std::env::temp_dir().join(format!(
+        "jsonl-lock-{}-{}",
+        std::process::id(),
+        super::NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = bind(&directory, "test").await.unwrap();
+    // dup shares the open file description just like fork before exec closes
+    // CLOEXEC descriptors. Avoid a timing-dependent concurrent process spawn.
+    let inherited = listener.lock.try_clone().unwrap();
+    assert!(bind(&directory, "test").await.is_err());
+    drop(listener);
+    let restarted = bind(&directory, "test").await;
+    drop(inherited);
+    let restarted =
+        restarted.expect("shutdown must release ownership before exec in another process");
+    assert!(bind(&directory, "test").await.is_err());
+    drop(restarted);
+    fs::remove_dir_all(directory).unwrap();
 }
