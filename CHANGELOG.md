@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Include current and initial application classes in workspace window snapshots
+  for presentation; missing class fields remain compatible with older snapshots.
+
 - Add guarded local workspace selection with optional focused-window movement;
   recheck destination existence and focus context atomically before dispatch.
 

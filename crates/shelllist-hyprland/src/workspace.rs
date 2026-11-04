@@ -30,6 +30,10 @@ pub struct Window {
     pub pid: u32,
     pub workspace: WorkspaceId,
     pub mapped: bool,
+    #[serde(default, rename = "class")]
+    pub class: String,
+    #[serde(default, rename = "initialClass")]
+    pub initial_class: String,
 }
 
 #[derive(Debug, Clone)]
