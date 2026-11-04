@@ -171,6 +171,66 @@ pub fn release_window(token: &str) -> Result<String> {
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedState {
+    Present,
+    Gone,
+    Moved,
+    Lost,
+}
+
+/// Observe the exact pinned window, including when its address has been reused.
+/// Unknown IPC failures remain errors, never evidence that a window disappeared.
+pub async fn pinned_state(
+    client: &Client,
+    token: &str,
+    address: &str,
+    pid: u32,
+    workspace: i64,
+) -> Result<PinnedState> {
+    let token = token_literal(token)?;
+    window_guard(address, pid, workspace)?;
+    let expression = format!(
+        "assert(__shelllist_window_refs and __shelllist_window_refs[{token}]~=nil,'shelllist-handoff-lost'); local w=hl.get_window('address:{}'); assert(w and w.mapped and __shelllist_window_refs[{token}]==w,'shelllist-handoff-gone'); assert(w.pid=={} and w.workspace and w.workspace.id=={},'shelllist-handoff-moved')",
+        address, pid, workspace
+    );
+    let reply = client.request_exact(&format!("eval {expression}")).await?;
+    if reply.trim() == "ok" {
+        Ok(PinnedState::Present)
+    } else if reply.contains("shelllist-handoff-gone") {
+        Ok(PinnedState::Gone)
+    } else if reply.contains("shelllist-handoff-moved") {
+        Ok(PinnedState::Moved)
+    } else if reply.contains("shelllist-handoff-lost") {
+        Ok(PinnedState::Lost)
+    } else {
+        anyhow::bail!("cannot observe pinned window: {}", reply.trim())
+    }
+}
+
+/// A successor may move only after the pinned predecessor has disappeared.
+/// Refresh the weak reference atomically with the move; never follow focus.
+pub fn replace_pinned(
+    token: &str,
+    previous_address: &str,
+    candidate: &Window,
+    destination: i64,
+    monitor: &str,
+) -> Result<String> {
+    let token = token_literal(token)?;
+    window_guard(previous_address, candidate.pid, destination)?;
+    let movement = move_local(
+        &candidate.address,
+        candidate.pid,
+        candidate.workspace.id,
+        destination,
+        monitor,
+    )?;
+    Ok(format!(
+        "local old=hl.get_window('address:{previous_address}'); assert(__shelllist_window_refs and __shelllist_window_refs[{token}]~=nil and (not old or not old.mapped or __shelllist_window_refs[{token}]~=old),'predecessor still mapped or identity lost'); {movement}; __shelllist_window_refs[{token}]=w"
+    ))
+}
+
 fn token_literal(token: &str) -> Result<String> {
     ensure!(
         !token.is_empty()
