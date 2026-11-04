@@ -243,6 +243,40 @@ fn token_literal(token: &str) -> Result<String> {
     quote(token)
 }
 
+/// Select a destination, optionally moving the currently focused window with it.
+/// The owner decides whether an absent compositor object may be materialized.
+/// Check existence again in the effect turn, so snapshot races cannot create it.
+pub fn select_local(
+    monitor: &str,
+    expected: i64,
+    destination: i64,
+    move_window: bool,
+    materialize: bool,
+) -> Result<String> {
+    ensure!(
+        expected > 0 && destination > 0 && destination <= i32::MAX as i64,
+        "invalid workspace"
+    );
+    let monitor = quote(monitor)?;
+    let existence = if materialize {
+        ""
+    } else {
+        "assert(target,'destination disappeared');"
+    };
+    let action = if move_window {
+        format!(
+            "local w=hl.get_active_window(); assert(w and w.mapped and w.workspace and w.workspace.id=={expected},'focused window changed'); local r=hl.dispatch(hl.dsp.window.move({{window=w,workspace={destination},follow=true}})); assert(r.ok,r.error)"
+        )
+    } else {
+        format!(
+            "local r=hl.dispatch(hl.dsp.focus({{workspace={destination}}})); assert(r.ok,r.error)"
+        )
+    };
+    Ok(format!(
+        "local m=hl.get_active_monitor(); assert(m and m.name=={monitor} and m.active_workspace and m.active_workspace.id=={expected},'focus context changed'); local target=hl.get_workspace({destination}); {existence} assert(not target or target.monitor==m,'foreign destination'); {action}"
+    ))
+}
+
 /// Focus/create on an explicit monitor without moving another monitor's workspace.
 /// expected guards the captured local focus; background replacement restores the
 /// previously focused monitor/window within the same compositor event turn.
@@ -307,6 +341,22 @@ fn window_guard(address: &str, pid: u32, workspace: i64) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_checks_existence_before_dispatch_and_guards_focus() {
+        for moving in [false, true] {
+            let guarded = select_local("DP-1", 1, 6, moving, false).unwrap();
+            assert!(guarded.find("assert(target,").unwrap() < guarded.find("hl.dispatch").unwrap());
+            assert!(guarded.contains("focus context changed"));
+            assert!(guarded.contains("foreign destination"));
+            assert!(
+                !select_local("DP-1", 1, 6, moving, true)
+                    .unwrap()
+                    .contains("assert(target,")
+            );
+        }
+        assert!(select_local("DP-1", 0, 6, true, false).is_err());
+    }
     #[test]
     fn close_never_falls_back_to_active_window_or_accepts_code() {
         for address in ["", "active", "0x", "0x1');evil()", "0xé"] {

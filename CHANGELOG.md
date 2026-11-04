@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add guarded local workspace selection with optional focused-window movement;
+  recheck destination existence and focus context atomically before dispatch.
+
 - Add guarded observation and replacement of pinned Hyprland windows, distinguishing address reuse and preserving focus. Destination ownership, process provenance, and handoff deadlines remain daemon policy.
 
 - Add `shelllist-hyprland::monitor` for typed, syntax-validated Lua monitor commands. Explicit enable/disable and mirror-reset semantics are shared by bar-daemon's manual layout and automatic docking paths; policy, persistence, safety checks and observed confirmation remain daemon-owned.
