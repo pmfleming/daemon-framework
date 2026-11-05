@@ -1,3 +1,7 @@
+mod address;
+mod error;
+pub use address::WindowAddress;
+pub use error::{IpcError, ack};
 pub mod monitor;
 pub mod preferences;
 pub mod work_area;
@@ -8,7 +12,6 @@ pub mod workspace;
 use std::{
     env,
     ffi::OsString,
-    future::Future,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::PathBuf,
     time::Duration,
@@ -81,32 +84,30 @@ impl Client {
             .transpose()
     }
 
-    /// Request with discovery fallback. Prefer [`Self::request_exact`] for mutations.
+    /// A configured signature pins reads and commands to that instance.
+    /// Discovery is allowed only when no signature was configured.
     pub async fn request(&self, command: &str) -> Result<String> {
-        bounded_ipc(async {
-            let stream = self.connect(COMMAND_SOCKET).await?;
-            // Fail over only while connecting, never replay a command that may
-            // already have changed compositor state.
-            request_socket(stream, command).await
-        })
-        .await
+        self.request_with(command, false).await
     }
 
-    /// Send only to the configured instance, never to a different signature.
-    ///
-    /// Requires a valid signature. Both runtime and legacy locations are tried,
-    /// but commands are never replayed after a connection succeeds.
+    /// Requires a configured instance; commands are never replayed after connect.
     pub async fn request_exact(&self, command: &str) -> Result<String> {
-        bounded_ipc(async {
-            let signature = self
-                .instance_signature()?
-                .context("exact Hyprland request requires an instance signature")?;
-            let candidates =
-                exact_socket_candidates(&self.roots(), signature, COMMAND_SOCKET).await;
-            let stream = connect_candidates(&candidates).await?;
-            request_socket(stream, command).await
-        })
-        .await
+        self.request_with(command, true).await
+    }
+
+    async fn request_with(&self, command: &str, exact: bool) -> Result<String> {
+        let deadline = time::Instant::now() + IPC_TIMEOUT;
+        let (stream, _) = self.connect_before(COMMAND_SOCKET, exact, deadline).await?;
+        time::timeout_at(deadline, request_socket(stream, command))
+            .await
+            .map_err(|_| {
+                anyhow::Error::new(IpcError::OutcomeUnknown).context("Hyprland exchange timed out")
+            })?
+    }
+
+    /// Watch this client's instance, including connection identity and event loss.
+    pub async fn watch_events(self, sender: mpsc::Sender<Event>) {
+        watch_events_with(self, sender, |event| event).await;
     }
 
     pub async fn work_areas(
@@ -122,12 +123,64 @@ impl Client {
     }
 
     pub async fn event_socket(&self) -> Result<UnixStream> {
-        bounded_ipc(self.connect(EVENT_SOCKET)).await
+        Ok(self
+            .connect_before(EVENT_SOCKET, false, time::Instant::now() + IPC_TIMEOUT)
+            .await?
+            .0)
     }
 
-    async fn connect(&self, socket: &str) -> Result<UnixStream> {
-        let candidates = socket_candidates(&self.roots(), self.instance_signature()?, socket).await;
-        connect_candidates(&candidates).await
+    async fn connect_before(
+        &self,
+        socket: &str,
+        exact: bool,
+        deadline: time::Instant,
+    ) -> Result<(UnixStream, String)> {
+        time::timeout_at(deadline, self.connect(socket, exact))
+            .await
+            .map_err(|_| {
+                anyhow::Error::new(IpcError::NotDelivered).context("Hyprland connect timed out")
+            })?
+            .map_err(|error| {
+                if error.downcast_ref::<IpcError>().is_some() {
+                    error
+                } else {
+                    anyhow::Error::new(IpcError::NotDelivered).context(format!("{error:#}"))
+                }
+            })
+    }
+
+    async fn connect(&self, socket: &str, exact: bool) -> Result<(UnixStream, String)> {
+        let signature = self.instance_signature()?;
+        anyhow::ensure!(
+            !exact || signature.is_some(),
+            "exact Hyprland request requires an instance signature"
+        );
+        let candidates = socket_candidates(&self.roots(), signature, socket).await;
+        match connect_candidates(&candidates).await {
+            Ok(connection) => Ok(connection),
+            Err(error) => {
+                // Diagnostic connections send no request and never rebind this client.
+                if let Some(configured) = signature {
+                    let others = socket_candidates(&self.roots(), None, socket)
+                        .await
+                        .into_iter()
+                        .filter(|p| {
+                            p.parent()
+                                .and_then(|p| p.file_name())
+                                .is_some_and(|v| v != configured)
+                        })
+                        .collect::<Vec<_>>();
+                    if let Ok((_, live)) = connect_candidates(&others).await {
+                        return Err(IpcError::SessionGone {
+                            configured: configured.into(),
+                            live,
+                        }
+                        .into());
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     fn roots(&self) -> Vec<PathBuf> {
@@ -141,14 +194,6 @@ impl Client {
     }
 }
 
-// One budget includes discovery, connection and (for commands) the entire
-// write/read exchange. Timing out drops the owned stream and pending discovery.
-async fn bounded_ipc<T>(operation: impl Future<Output = Result<T>>) -> Result<T> {
-    time::timeout(IPC_TIMEOUT, operation)
-        .await
-        .context("Hyprland IPC timed out")?
-}
-
 async fn exact_socket_candidates(roots: &[PathBuf], signature: &str, socket: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let uid = rustix::process::geteuid().as_raw();
@@ -158,17 +203,17 @@ async fn exact_socket_candidates(roots: &[PathBuf], signature: &str, socket: &st
     candidates
 }
 
-// Prefer the requested instance in either root, then sorted fallback instances
-// in runtime-root / legacy-root order. Socket existence alone is not liveness.
+// A configured instance is exact across both roots. Without one, discover in
+// sorted runtime-root / legacy-root order. Existence alone is not liveness.
 async fn socket_candidates(
     roots: &[PathBuf],
     signature: Option<&str>,
     socket: &str,
 ) -> Vec<PathBuf> {
-    let mut candidates = match signature {
-        Some(signature) => exact_socket_candidates(roots, signature, socket).await,
-        None => Vec::new(),
-    };
+    if let Some(signature) = signature {
+        return exact_socket_candidates(roots, signature, socket).await;
+    }
+    let mut candidates = Vec::new();
     let uid = rustix::process::geteuid().as_raw();
     for root in roots {
         let Ok(mut entries) = fs::read_dir(root).await else {
@@ -218,7 +263,7 @@ fn validate_peer(stream: UnixStream, uid: u32) -> Result<UnixStream> {
     Ok(stream)
 }
 
-async fn connect_candidates(candidates: &[PathBuf]) -> Result<UnixStream> {
+async fn connect_candidates(candidates: &[PathBuf]) -> Result<(UnixStream, String)> {
     let mut last_error = None;
     for socket in candidates {
         let connection = UnixStream::connect(socket)
@@ -226,7 +271,14 @@ async fn connect_candidates(candidates: &[PathBuf]) -> Result<UnixStream> {
             .map_err(anyhow::Error::new)
             .and_then(|stream| validate_peer(stream, rustix::process::geteuid().as_raw()));
         match connection {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => {
+                let instance = socket
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|v| v.to_str())
+                    .context("invalid instance socket path")?;
+                return Ok((stream, instance.to_owned()));
+            }
             Err(error) => {
                 last_error =
                     Some(error.context(format!("connect to Hyprland socket {}", socket.display())))
@@ -341,17 +393,24 @@ async fn read_event(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<S
 }
 
 async fn request_socket(mut stream: UnixStream, command: &str) -> Result<String> {
-    stream.write_all(command.as_bytes()).await?;
-    stream.shutdown().await?;
+    stream
+        .write_all(command.as_bytes())
+        .await
+        .map_err(|error| anyhow::Error::new(IpcError::OutcomeUnknown).context(error))?;
+    stream
+        .shutdown()
+        .await
+        .map_err(|error| anyhow::Error::new(IpcError::OutcomeUnknown).context(error))?;
     let mut response = Vec::new();
     stream
         .take(MAX_REPLY_BYTES + 1)
         .read_to_end(&mut response)
-        .await?;
-    anyhow::ensure!(
-        response.len() as u64 <= MAX_REPLY_BYTES,
-        "Hyprland reply is too large"
-    );
+        .await
+        .map_err(|error| anyhow::Error::new(IpcError::OutcomeUnknown).context(error))?;
+    if response.len() as u64 > MAX_REPLY_BYTES {
+        return Err(anyhow::Error::new(IpcError::InvalidReply)
+            .context("Hyprland reply is too large; command outcome unknown"));
+    }
     Ok(String::from_utf8_lossy(&response).into_owned())
 }
 
@@ -442,11 +501,13 @@ mod tests {
                 assert!(error.to_string().contains("HYPRLAND_INSTANCE_SIGNATURE"));
             }
         }
-        assert!(
-            time::timeout(Duration::from_millis(50), fallback.accept())
-                .await
-                .is_err()
-        );
+        while let Ok(Ok((mut stream, _))) =
+            time::timeout(Duration::from_millis(50), fallback.accept()).await
+        {
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            assert!(bytes.is_empty(), "diagnostic connection sent a command");
+        }
     }
 
     #[tokio::test]
@@ -460,7 +521,12 @@ mod tests {
             let result = client.request_exact("j/clients").await;
             if oversized {
                 // take(MAX + 1) retains only the first byte of é.
-                assert!(result.unwrap_err().to_string().contains("too large"));
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("too large"));
+                assert_eq!(
+                    error.downcast_ref::<super::IpcError>(),
+                    Some(&super::IpcError::InvalidReply)
+                );
             } else {
                 let reply = result.unwrap();
                 assert_eq!(reply.len(), super::MAX_REPLY_BYTES as usize);
@@ -490,13 +556,11 @@ mod tests {
         let (mut stream, _) = listener.accept().await.unwrap();
         stream.read_to_end(&mut Vec::new()).await.unwrap();
         time::pause(); // The connected peer deliberately never replies.
-        assert!(
-            request
-                .await
-                .unwrap()
-                .unwrap_err()
-                .to_string()
-                .contains("timed out")
+        let error = request.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert_eq!(
+            error.downcast_ref::<super::IpcError>(),
+            Some(&super::IpcError::OutcomeUnknown)
         );
     }
 

@@ -18,7 +18,7 @@ pub struct WorkspaceId {
 
 /// Workspace identity across numbered and special workspaces. Hyprland 0.57
 /// omits `id` for special workspaces; never interpret absence as workspace zero.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(from = "WorkspaceRefWire")]
 pub struct WorkspaceRef {
     pub id: Option<i64>,
@@ -154,12 +154,7 @@ pub fn quote(value: &str) -> Result<String> {
 
 pub async fn execute(client: &Client, expression: &str) -> Result<()> {
     let reply = client.request_exact(&format!("eval {expression}")).await?;
-    ensure!(
-        reply.trim() == "ok",
-        "compositor rejected command: {}",
-        reply.trim()
-    );
-    Ok(())
+    crate::ack(&reply)
 }
 
 pub fn guarded_close(address: &str, pid: u32, workspace: i64) -> Result<String> {
@@ -374,14 +369,8 @@ pub fn move_local(
 }
 
 fn window_guard(address: &str, pid: u32, workspace: i64) -> Result<String> {
-    ensure!(
-        address.starts_with("0x")
-            && address.len() > 2
-            && address.len() <= 18
-            && address[2..].bytes().all(|b| b.is_ascii_hexdigit())
-            && pid > 0,
-        "invalid window identity"
-    );
+    let address = crate::WindowAddress::parse(address)?;
+    ensure!(pid > 0, "invalid window identity");
     ensure!(workspace > 0, "ordinary workspace required");
     Ok(format!(
         "local w=hl.get_window('address:{address}'); assert(w and w.mapped and w.pid=={pid} and w.workspace and w.workspace.id=={workspace}, 'stale window');"

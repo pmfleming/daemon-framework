@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add downcastable IPC delivery errors, exact single-command acknowledgements,
+  validated window addresses and client-owned event watching. Connection and
+  exchange share one deadline; configured signatures never redirect requests.
+
 - Record the successfully deployed Hyprland 0.57.1 upgrade after the Mesa/libc
   repair, and validate snapshot/work-area decoding against a redacted capture
   of the actual upgraded desktop. Physical recovery validation remains pending.
