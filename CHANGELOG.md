@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve numberless named workspace identities in events, workspace/monitor
+  reads and literal destination selectors. Capture real private 0.57.1 named
+  JSON/events and verify numbered pin guards still reject named destinations.
+
 - Document the complete Hyprland IPC contract and add opt-in Nix-wired private
   acceptance. Compile every Lua builder without effects, construct dispatchers
   without dispatch, and exercise live pinned replacement/state/prefix guards

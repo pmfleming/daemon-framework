@@ -15,6 +15,7 @@ pub struct Insets {
 #[serde(default)]
 struct WorkspaceRef {
     id: Option<i64>,
+    address: Option<String>,
     name: String,
 }
 impl WorkspaceRef {
@@ -23,6 +24,9 @@ impl WorkspaceRef {
     }
 
     fn matches(&self, workspace: &Workspace) -> bool {
+        if let (Some(address), Some(other)) = (&self.address, &workspace.address) {
+            return !address.is_empty() && address == other;
+        }
         match (self.id, workspace.id) {
             (Some(id), Some(other)) if id != 0 => id == other,
             _ => !self.name.is_empty() && self.name == workspace.name,
@@ -62,6 +66,9 @@ struct Monitor {
 #[derive(Debug, Deserialize)]
 struct Workspace {
     id: Option<i64>,
+    address: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
     name: String,
     #[serde(default)]
     windows: usize,
@@ -70,7 +77,10 @@ struct Workspace {
 }
 impl Workspace {
     fn special(&self) -> bool {
-        self.name.starts_with("special:") || self.id.is_some_and(|id| (-1336..-1).contains(&id))
+        self.kind.as_deref().map_or_else(
+            || self.name.starts_with("special:"),
+            |kind| kind == "special",
+        )
     }
 }
 #[derive(Debug, Default, Deserialize)]
@@ -314,8 +324,9 @@ fn term(
         "n" => match value.split_once(':') {
             Some(("s", prefix)) => workspace.name.starts_with(prefix),
             Some(("e", suffix)) => workspace.name.ends_with(suffix),
-            _ => integer
-                .is_none_or(|value| i64::from(workspace.id.is_some_and(|id| id <= -1337)) == value),
+            _ => integer.is_none_or(|value| {
+                i64::from(workspace.id.is_none() && !workspace.special()) == value
+            }),
         },
         "m" => monitor_matches(value, monitor, &snapshot.monitors),
         "w" => {

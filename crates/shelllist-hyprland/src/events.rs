@@ -92,14 +92,14 @@ impl CompositorEvent {
                 };
                 let special = identity.starts_with("special:");
                 let id = identity.parse::<i64>().ok().filter(|id| *id > 0);
-                if (name.ends_with("v2") && id.is_none() && !special) || identity == "special:" {
+                if identity == "special:" {
                     return malformed();
                 }
                 Self::WindowMoved {
                     address,
                     workspace: WorkspaceRef {
                         id,
-                        address: name.ends_with("v2").then(|| identity.into()),
+                        address: Some(identity.into()),
                         name: display.into(),
                         special,
                     },
@@ -271,7 +271,6 @@ mod tests {
         for line in [
             "movewindowv2>>bad!,1,one",
             "movewindowv2>>123,1",
-            "movewindowv2>>123,bogus,name",
             "movewindowv2>>123,special:,name",
             "openwindow>>",
             "windowtitlev2>>123",
@@ -301,6 +300,23 @@ mod tests {
                 data: "a,b,c".into()
             }
         );
+    }
+
+    #[test]
+    fn named_moves_keep_the_address_without_inventing_a_number() {
+        for line in [
+            "movewindow>>123,project",
+            "movewindowv2>>123,project,display,with,commas",
+        ] {
+            let CompositorEvent::WindowMoved { workspace, .. } = CompositorEvent::parse(line)
+            else {
+                panic!("expected named move")
+            };
+            assert_eq!(workspace.id, None);
+            assert_eq!(workspace.address.as_deref(), Some("project"));
+            assert!(!workspace.special);
+            assert_eq!(workspace.selector().unwrap(), "name:project");
+        }
     }
 
     #[test]

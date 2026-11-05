@@ -521,6 +521,113 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     })
     .await
     .unwrap();
+    // Capture a real named regular workspace: 0.57 gives it an address but no id.
+    workspace::execute(
+        &client,
+        &shelllist_hyprland::lua::toggle_special("ipc-probe").unwrap(),
+    )
+    .await
+    .unwrap();
+    let raw_events = tokio::net::UnixStream::connect(
+        root.join("hypr")
+            .join(client.instance_signature().unwrap().unwrap())
+            .join(".socket2.sock"),
+    )
+    .await
+    .unwrap();
+    workspace::execute(
+        &client,
+        &shelllist_hyprland::lua::move_window(&window.address, "name:ipc-review").unwrap(),
+    )
+    .await
+    .unwrap();
+    workspace::execute(
+        &client,
+        &shelllist_hyprland::lua::focus_window(&window.address).unwrap(),
+    )
+    .await
+    .unwrap();
+    let named = client.active_workspace().await.unwrap();
+    assert_eq!(named.id, None);
+    assert!(!named.special);
+    assert_eq!(named.address.as_deref(), Some("ipc-review"));
+    assert_eq!(named.selector().unwrap(), "name:ipc-review");
+    let observed = workspace::snapshot(&client).await.unwrap();
+    assert!(
+        observed
+            .workspaces
+            .iter()
+            .any(|w| w.address == named.address && w.id.is_none() && !w.special)
+    );
+    assert!(
+        observed
+            .monitors
+            .iter()
+            .any(|m| m.active_workspace == named)
+    );
+    assert!(!client.work_areas().await.unwrap().is_empty());
+    assert!(
+        workspace::execute(
+            &client,
+            &workspace::pin_window("named-must-not-pin", &window.address, window.pid, 6).unwrap()
+        )
+        .await
+        .is_err()
+    );
+    let mut capture = serde_json::Map::new();
+    for key in [
+        "monitors",
+        "workspaces",
+        "clients",
+        "activeworkspace",
+        "activewindow",
+        "workspacerules",
+    ] {
+        capture.insert(
+            key.into(),
+            serde_json::from_str::<serde_json::Value>(
+                &client.request_exact(&format!("j/{key}")).await.unwrap(),
+            )
+            .unwrap(),
+        );
+    }
+    capture.insert(
+        "gaps".into(),
+        serde_json::from_str(
+            &client
+                .request_exact("j/getoption general:gaps_out")
+                .await
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    fs::write(
+        root.join("named.json"),
+        serde_json::to_string_pretty(&capture).unwrap(),
+    )
+    .unwrap();
+    use tokio::io::AsyncBufReadExt;
+    let mut raw_events = tokio::io::BufReader::new(raw_events).lines();
+    let mut moves = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while moves.len() < 2 {
+            let line = raw_events.next_line().await.unwrap().unwrap();
+            if line.starts_with("movewindow>>") || line.starts_with("movewindowv2>>") {
+                let shelllist_hyprland::CompositorEvent::WindowMoved { workspace, .. } =
+                    shelllist_hyprland::CompositorEvent::parse(&line)
+                else {
+                    panic!("malformed live named move: {line}")
+                };
+                assert_eq!(workspace.id, None);
+                assert!(!workspace.special);
+                assert_eq!(workspace.address, named.address);
+                moves.push(line);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    fs::write(root.join("named-events.txt"), moves.join("\n") + "\n").unwrap();
     drop(event_receiver);
     event_task.await.unwrap();
 }

@@ -1,0 +1,295 @@
+{
+  "activewindow": {
+    "acceptsInput": true,
+    "address": "0x123",
+    "allowedOverFullscreen": true,
+    "at": [
+      21,
+      21
+    ],
+    "class": "org.freedesktop.weston.flower",
+    "contentType": "none",
+    "floating": false,
+    "focusHistoryID": 0,
+    "fullscreen": 0,
+    "fullscreenClient": 0,
+    "fullscreenHandler": "default",
+    "grouped": [],
+    "hidden": false,
+    "inhibitingIdle": false,
+    "initialClass": "org.freedesktop.weston.flower",
+    "initialTitle": "redacted",
+    "mapped": true,
+    "monitor": 0,
+    "pid": 42,
+    "pinFullscreened": false,
+    "pinned": false,
+    "size": [
+      872,
+      688
+    ],
+    "stableId": "18000004",
+    "swallowing": "0x0",
+    "tags": [],
+    "tearingHint": false,
+    "title": "redacted",
+    "visible": true,
+    "workspace": {
+      "address": "ipc-review",
+      "name": "ipc-review",
+      "type": "normal"
+    },
+    "xdgDescription": "",
+    "xdgTag": "",
+    "xwayland": false
+  },
+  "activeworkspace": {
+    "address": "ipc-review",
+    "hasfullscreen": false,
+    "ispersistent": false,
+    "lastwindow": "0x123",
+    "lastwindowtitle": "redacted",
+    "monitor": "WAYLAND-1",
+    "monitorID": 0,
+    "name": "ipc-review",
+    "tiledLayout": "dwindle",
+    "type": "normal",
+    "windows": 1
+  },
+  "clients": [
+    {
+      "acceptsInput": true,
+      "address": "0x123",
+      "allowedOverFullscreen": true,
+      "at": [
+        21,
+        21
+      ],
+      "class": "org.freedesktop.weston.flower",
+      "contentType": "none",
+      "floating": false,
+      "focusHistoryID": 0,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "default",
+      "grouped": [],
+      "hidden": false,
+      "inhibitingIdle": false,
+      "initialClass": "org.freedesktop.weston.flower",
+      "initialTitle": "redacted",
+      "mapped": true,
+      "monitor": 0,
+      "pid": 42,
+      "pinFullscreened": false,
+      "pinned": false,
+      "size": [
+        872,
+        688
+      ],
+      "stableId": "18000004",
+      "swallowing": "0x0",
+      "tags": [],
+      "tearingHint": false,
+      "title": "redacted",
+      "visible": true,
+      "workspace": {
+        "address": "ipc-review",
+        "name": "ipc-review",
+        "type": "normal"
+      },
+      "xdgDescription": "",
+      "xdgTag": "",
+      "xwayland": false
+    }
+  ],
+  "gaps": {
+    "css": "20 20 20 20",
+    "option": "general:gaps_out",
+    "set": false
+  },
+  "monitors": [
+    {
+      "activeWorkspace": {
+        "address": "ipc-review",
+        "name": "ipc-review",
+        "type": "normal"
+      },
+      "activelyTearing": false,
+      "availableModes": [
+        "1371x1095@60.00Hz"
+      ],
+      "colorManagementPreset": "srgb",
+      "currentFormat": "XRGB8888",
+      "description": "redacted",
+      "directScanoutBlockedBy": [
+        "USER",
+        "CANDIDATE"
+      ],
+      "directScanoutTo": "0",
+      "disabled": false,
+      "dpmsStatus": true,
+      "focused": true,
+      "hardwareCursorsInUse": true,
+      "hardwareDetails": {
+        "backend": "wayland",
+        "bt2020": false,
+        "chroma": false,
+        "hdr": false,
+        "vrrCapable": false
+      },
+      "height": 1095,
+      "id": 0,
+      "make": "redacted",
+      "mirrorOf": "none",
+      "model": "redacted",
+      "name": "WAYLAND-1",
+      "physicalHeight": 0,
+      "physicalWidth": 0,
+      "refreshRate": 60.0,
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 1.5,
+      "sdrBrightness": 1,
+      "sdrMaxLuminance": 80,
+      "sdrMinLuminance": 0.2,
+      "sdrSaturation": 1,
+      "serial": "redacted",
+      "solitary": "0",
+      "solitaryBlockedBy": [
+        "NOTIFICATION",
+        "WINDOWED",
+        "OFFSET",
+        "CANDIDATE"
+      ],
+      "specialWorkspace": {
+        "address": "",
+        "name": "",
+        "type": ""
+      },
+      "tearingBlockedBy": [
+        "NOT_TORN",
+        "USER",
+        "ZOOM",
+        "SUPPORT",
+        "CANDIDATE",
+        "HW_CURSOR"
+      ],
+      "transform": 0,
+      "vrr": false,
+      "width": 1371,
+      "x": 0,
+      "y": 0
+    },
+    {
+      "activeWorkspace": {
+        "address": "8",
+        "id": 8,
+        "name": "8",
+        "type": "normal"
+      },
+      "activelyTearing": false,
+      "availableModes": [
+        "1920x1080@60.00Hz"
+      ],
+      "colorManagementPreset": "srgb",
+      "currentFormat": "XRGB8888",
+      "description": "redacted",
+      "directScanoutBlockedBy": [
+        "USER",
+        "SW",
+        "CANDIDATE"
+      ],
+      "directScanoutTo": "0",
+      "disabled": false,
+      "dpmsStatus": true,
+      "focused": false,
+      "hardwareCursorsInUse": true,
+      "hardwareDetails": {
+        "backend": "headless",
+        "bt2020": false,
+        "chroma": false,
+        "hdr": false,
+        "vrrCapable": false
+      },
+      "height": 1080,
+      "id": 1,
+      "make": "redacted",
+      "mirrorOf": "none",
+      "model": "redacted",
+      "name": "HEADLESS-1",
+      "physicalHeight": 0,
+      "physicalWidth": 0,
+      "refreshRate": 60.0,
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 2,
+      "sdrBrightness": 1,
+      "sdrMaxLuminance": 80,
+      "sdrMinLuminance": 0.2,
+      "sdrSaturation": 1,
+      "serial": "redacted",
+      "solitary": "0",
+      "solitaryBlockedBy": [
+        "NOTIFICATION",
+        "WINDOWED",
+        "OFFSET",
+        "CANDIDATE"
+      ],
+      "specialWorkspace": {
+        "address": "",
+        "name": "",
+        "type": ""
+      },
+      "tearingBlockedBy": [
+        "NOT_TORN",
+        "USER",
+        "ZOOM",
+        "SUPPORT",
+        "CANDIDATE"
+      ],
+      "transform": 0,
+      "vrr": false,
+      "width": 1920,
+      "x": 914,
+      "y": 0
+    }
+  ],
+  "workspacerules": [],
+  "workspaces": [
+    {
+      "address": "8",
+      "hasfullscreen": false,
+      "id": 8,
+      "ispersistent": false,
+      "lastwindow": "0x0",
+      "lastwindowtitle": "redacted",
+      "monitor": "HEADLESS-1",
+      "monitorID": 1,
+      "name": "8",
+      "tiledLayout": "dwindle",
+      "type": "normal",
+      "windows": 0
+    },
+    {
+      "address": "ipc-review",
+      "hasfullscreen": false,
+      "ispersistent": false,
+      "lastwindow": "0x123",
+      "lastwindowtitle": "redacted",
+      "monitor": "WAYLAND-1",
+      "monitorID": 0,
+      "name": "ipc-review",
+      "tiledLayout": "dwindle",
+      "type": "normal",
+      "windows": 1
+    }
+  ]
+}

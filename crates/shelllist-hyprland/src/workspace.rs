@@ -7,25 +7,28 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize, Hash)]
 pub struct Workspace {
-    pub id: Option<i64>,
+    #[serde(flatten)]
+    pub identity: WorkspaceRef,
     pub monitor: String,
     pub windows: u32,
-    #[serde(default)]
-    pub name: String,
     #[serde(default, rename = "hasfullscreen")]
     pub has_fullscreen: bool,
     #[serde(default, rename = "lastwindowtitle")]
     pub last_window_title: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Hash)]
-pub struct WorkspaceId {
-    pub id: Option<i64>,
+impl std::ops::Deref for Workspace {
+    type Target = WorkspaceRef;
+    fn deref(&self) -> &Self::Target {
+        &self.identity
+    }
 }
 
-/// Workspace identity across numbered and special workspaces. Hyprland 0.57
-/// omits `id` for special workspaces; never interpret absence as workspace zero.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Hash)]
+pub type WorkspaceId = WorkspaceRef;
+
+/// Workspace identity across numbered, named and special workspaces. Hyprland 0.57
+/// omits `id` for named and special workspaces; never interpret absence as workspace zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, Deserialize, Hash)]
 #[serde(from = "WorkspaceRefWire")]
 pub struct WorkspaceRef {
     pub id: Option<i64>,
@@ -51,13 +54,42 @@ impl From<WorkspaceRefWire> for WorkspaceRef {
             || value
                 .address
                 .as_deref()
-                .is_some_and(|s| s.starts_with("special:"))
-            || value.id.is_some_and(|id| (-1336..-1).contains(&id));
+                .is_some_and(|s| s.starts_with("special:"));
         Self {
             id: value.id,
             address: value.address,
             name: value.name,
             special,
+        }
+    }
+}
+
+impl WorkspaceRef {
+    /// Resolve identity, never the display name of a numbered workspace.
+    /// Prefix named addresses so reserved names such as `next` remain literal.
+    pub fn selector(&self) -> Result<String> {
+        if !self.special
+            && let Some(id) = self.id.filter(|id| *id > 0)
+        {
+            return Ok(id.to_string());
+        }
+        let address = self
+            .address
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .context("workspace has no address or number")?;
+        ensure!(
+            address.len() <= 128 && !address.chars().any(char::is_control),
+            "invalid workspace address"
+        );
+        if self.special {
+            ensure!(
+                address.starts_with("special:") && address.len() > 8,
+                "invalid special workspace address"
+            );
+            Ok(address.into())
+        } else {
+            Ok(format!("name:{address}"))
         }
     }
 }
@@ -490,6 +522,54 @@ mod tests {
         let release = release_prefix("owned-").unwrap();
         assert!(release.contains("key:sub(1,"));
         assert!(!release.contains("hl.dispatch"));
+    }
+
+    #[test]
+    fn captured_named_identity_survives_all_read_models_and_literal_selectors() {
+        let capture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/0.57.1/named.json")).unwrap();
+        let status = Status::parse(&format!(
+            "{}\n\n{}\n\n{}",
+            capture["workspaces"], capture["monitors"], capture["activewindow"]
+        ))
+        .unwrap();
+        let named: WorkspaceRef =
+            serde_json::from_value(capture["activeworkspace"].clone()).unwrap();
+        assert_eq!(named.id, None);
+        assert!(!named.special);
+        assert_eq!(named.selector().unwrap(), "name:ipc-review");
+        assert!(status.workspaces.iter().any(|w| w.identity == named));
+        assert!(status.monitors.iter().any(|m| m.active_workspace == named));
+        assert_eq!(status.active_window.unwrap().workspace, named);
+        for line in include_str!("../tests/fixtures/0.57.1/named-events.txt").lines() {
+            let crate::CompositorEvent::WindowMoved { workspace, .. } =
+                crate::CompositorEvent::parse(line)
+            else {
+                panic!("named move")
+            };
+            assert_eq!(workspace, named);
+        }
+        for name in ["next", "project space", "quote' and; punctuation"] {
+            let reference = WorkspaceRef {
+                address: Some(name.into()),
+                ..Default::default()
+            };
+            let selector = reference.selector().unwrap();
+            assert_eq!(selector, format!("name:{name}"));
+            let command = crate::lua::move_window("0x123", &selector).unwrap();
+            assert!(command.contains(&quote(&selector).unwrap()));
+        }
+        assert_eq!(
+            WorkspaceRef {
+                id: Some(7),
+                name: "6".into(),
+                ..Default::default()
+            }
+            .selector()
+            .unwrap(),
+            "7"
+        );
+        assert!(WorkspaceRef::default().selector().is_err());
     }
 
     #[tokio::test]

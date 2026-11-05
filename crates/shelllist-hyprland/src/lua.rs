@@ -75,10 +75,7 @@ pub fn toggle_special(name: &str) -> Result<Lua> {
 pub fn move_window(address: &str, workspace: &str) -> Result<Lua> {
     let address = crate::WindowAddress::parse(address)?;
     ensure!(
-        !workspace.is_empty()
-            && workspace
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-.+:".contains(&c)),
+        !workspace.is_empty() && workspace.len() <= 133 && !workspace.chars().any(char::is_control),
         "invalid workspace selector"
     );
     let workspace = quote(workspace)?;

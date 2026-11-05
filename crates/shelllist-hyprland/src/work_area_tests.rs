@@ -126,3 +126,21 @@ fn numberless_special_workspace_rules_and_clients_match_by_name() {
         assert_margins(&parts, "eDP-1", [2.0, 53.0, 2.0, 2.0]);
     }
 }
+
+#[test]
+fn named_rules_use_numberless_regular_identity_and_match_addresses() {
+    let mut parts = fixture();
+    parts[0][0]["activeWorkspace"] = json!({"address":"project","name":"shared display"});
+    parts[1] = json!([
+        {"address":"other","name":"shared display","type":"normal","windows":0},
+        {"address":"project","name":"shared display","type":"normal","windows":1}
+    ]);
+    parts[3] = json!([{ "workspace":{"address":"project","name":"shared display"},"mapped":true,"floating":false }]);
+    parts[2] = json!([{ "workspaceString":"n[true] w[1]","gapsOut":[7] }]);
+    assert_margins(&parts, "eDP-1", [7.0, 58.0, 7.0, 7.0]);
+    parts[0][0]["specialWorkspace"] = json!({"address":"special:probe","name":"special:probe"});
+    parts[1].as_array_mut().unwrap().push(
+        json!({"address":"special:probe","name":"special:probe","type":"special","windows":1}),
+    );
+    assert_margins(&parts, "eDP-1", [2.0, 53.0, 2.0, 2.0]);
+}

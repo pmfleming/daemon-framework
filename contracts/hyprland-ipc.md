@@ -38,8 +38,9 @@ rollback restores the compositor and consumers together.
   remain observable, without deduplication. Unknown names remain `Unknown`.
 - Moved-window addresses use `WindowAddress`: `0x` plus 1–16 hex digits, nonzero.
   Snapshot addresses remain strings so a consumer can filter one bad address.
-  A special workspace has an address/name and no numeric ID. It is not workspace
-  zero or a malformed ordinary move. Comma-bearing display data uses bounded
+  Named regular and special workspaces have an address/name and no numeric ID.
+  Neither is workspace zero or a malformed ordinary move. Both move-event forms
+  preserve the address; a display name never replaces it. Comma-bearing display data uses bounded
   splitting. Known malformed payloads remain `Malformed`.
 - Compositor intake uses `try_send`. Saturation drops notifications and records
   one pending `Lagged`, delivered when room exists even if the socket is idle.
@@ -71,18 +72,26 @@ rollback restores the compositor and consumers together.
   Replacement requires the predecessor to be gone while identity remains known;
   stale/moved/lost observations never authorize guessed replacements. Prefix
   release removes only matching references, never windows or routing state.
-- Bar owns `shelllist-bar-workspace-` tokens. First journal load fences old
-  observers and clears only this namespace before admitting new pins, covering
+- Bar owns `shelllist-bar-workspace-` tokens. Journal loading fences old
+  observers without a capability probe. Immediately before the first handoff pin
+  or close snapshot, the owner clears only this namespace, covering
   crashes between pinning and durable admission. Legacy unnamed orphans require
-  a compositor restart; no broad reference-table reset is used.
+  a compositor restart; no broad reference-table reset is used. Failed cleanup
+  admits no new pins and is retryable. Manual moves to named/special workspaces
+  cancel affected handoffs even if a window returns/closes before reconciliation.
 
 ## Read models and evidence
 
 Window address/PID/workspace and monitor identity remain required. Display fields
 default; absent focus rank stays `i64::MAX`. Workspace numbers are optional for
-special workspaces. Status batches workspaces, monitors and active window in one
-turn; an empty active-window object is `None`. The bar's existing non-numbered
-wire sentinel never enters ordinary workspace allocation. Urgency is not supplied
+named regular and special workspaces. Workspace/monitor/window reads retain
+the same address-bearing identity. `WorkspaceRef::selector` produces numbered,
+`name:<address>` or `special:<name>` selectors and rejects missing identity. Status batches workspaces, monitors and active window in one
+turn; an empty active-window object is `None`. The bar publishes regular
+workspaces with optional numeric IDs and addresses; active identities have null
+numbers when absent. Its numbered strip and lifecycle journal exclude numberless
+destinations. Lifecycle creation/close/reserved placement from named workspaces
+remain unsupported rather than bypassing numbered identity guards. Urgency is not supplied
 by stock workspace JSON and remains false in the existing bar projection.
 Geometry resolves special rules and occupancy by name when a number is absent.
 Empty special-workspace monitor entries are absent, and two missing numbers

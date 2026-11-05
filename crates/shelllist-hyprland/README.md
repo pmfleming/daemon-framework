@@ -55,7 +55,7 @@ environment instead of continuing journals under another session identity.
 are `Disconnected(Option<String>)`, `ConnectFailed(String)`, `SessionGone` and
 `Lagged`. Compositor notifications use `Event::Compositor(CompositorEvent)`.
 Known v1/v2 names share variants; moved windows carry validated `WindowAddress`
-and `WorkspaceRef` identities. Special workspaces have no numeric ID. Unknown
+and `WorkspaceRef` identities. Named regular and special workspaces have no numeric ID. Unknown
 names remain `Unknown`, and malformed known payloads remain `Malformed`.
 Consumers resynchronize on `Lagged`/`Malformed` rather than trusting lost state.
 `invalidates_geometry` and `invalidates_preferences` replace raw prefix lists.
@@ -137,8 +137,9 @@ pixel clamping, window placement and presentation-specific layer rules.
 batch. `Client::status` batches workspaces, monitors and active window; an empty
 active-window object is None. `active_workspace` and `options` are typed/validated
 read adapters. Display fields default; window address, PID and workspace remain
-required, and absent focus rank stays i64::MAX. Special workspaces keep their
-name/address with no number. Do not invent workspace zero for allocation.
+required, and absent focus rank stays i64::MAX. Named regular and special workspaces keep their
+name/address with no number. `WorkspaceRef::selector` turns that identity into a
+literal destination without confusing the display name with the address. Do not invent workspace zero for allocation.
 
 `workspace` supplies guarded focus, follow, move, pin, close and replacement.
 Guards recheck PID, mapping, workspace, focus intent and destination ownership in
