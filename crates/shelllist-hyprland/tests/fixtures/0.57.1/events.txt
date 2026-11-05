@@ -1,0 +1,26 @@
+createworkspace>>1
+createworkspacev2>>1,1
+focusedmon>>WAYLAND-1,1
+focusedmonv2>>WAYLAND-1,1
+monitoradded>>WAYLAND-1
+monitoraddedv2>>0,WAYLAND-1,
+activelayout>>wl_keyboard,English (US)
+createworkspace>>6
+createworkspacev2>>6,6
+workspace>>6
+workspacev2>>6,6
+destroyworkspace>>1
+destroyworkspacev2>>1,1
+windowtitle>>5555568ac8b0
+windowtitlev2>>5555568ac8b0,redacted
+openwindow>>5555568ac8b0,6,org.freedesktop.weston.flower,redacted
+activewindow>>org.freedesktop.weston.flower,redacted
+activewindowv2>>5555568ac8b0
+createworkspace>>special:ipc-probe
+createworkspacev2>>special:ipc-probe,special:ipc-probe
+activewindow>>,redacted
+activewindowv2>>
+activespecial>>special:ipc-probe,WAYLAND-1
+activespecialv2>>special:ipc-probe,special:ipc-probe,WAYLAND-1
+movewindow>>5555568ac8b0,special:ipc-probe
+movewindowv2>>5555568ac8b0,special:ipc-probe,special:ipc-probe

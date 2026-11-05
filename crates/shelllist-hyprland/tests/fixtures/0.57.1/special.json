@@ -1,0 +1,164 @@
+{
+  "monitors": [
+    {
+      "id": 0,
+      "name": "WAYLAND-1",
+      "description": "redacted",
+      "make": "redacted",
+      "model": "redacted",
+      "serial": "redacted",
+      "width": 1371,
+      "height": 1095,
+      "physicalWidth": 0,
+      "physicalHeight": 0,
+      "refreshRate": 60.0,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "address": "6",
+        "id": 6,
+        "type": "normal",
+        "name": "6"
+      },
+      "specialWorkspace": {
+        "address": "special:ipc-probe",
+        "type": "special",
+        "name": "special:ipc-probe"
+      },
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 1.5,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitary": "0",
+      "solitaryBlockedBy": [
+        "NOTIFICATION",
+        "WINDOWED",
+        "SPECIAL",
+        "OFFSET",
+        "CANDIDATE"
+      ],
+      "activelyTearing": false,
+      "tearingBlockedBy": [
+        "NOT_TORN",
+        "USER",
+        "ZOOM",
+        "SUPPORT",
+        "CANDIDATE",
+        "HW_CURSOR"
+      ],
+      "directScanoutTo": "0",
+      "directScanoutBlockedBy": [
+        "USER",
+        "CANDIDATE"
+      ],
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "1371x1095@60.00Hz"
+      ],
+      "colorManagementPreset": "srgb",
+      "sdrBrightness": 1,
+      "sdrSaturation": 1,
+      "sdrMinLuminance": 0.2,
+      "sdrMaxLuminance": 80,
+      "hardwareCursorsInUse": true,
+      "hardwareDetails": {
+        "backend": "wayland",
+        "hdr": false,
+        "chroma": false,
+        "bt2020": false,
+        "vrrCapable": false
+      }
+    }
+  ],
+  "workspaces": [
+    {
+      "address": "6",
+      "id": 6,
+      "type": "normal",
+      "name": "6",
+      "monitor": "WAYLAND-1",
+      "monitorID": 0,
+      "windows": 0,
+      "hasfullscreen": false,
+      "lastwindow": "0x0",
+      "lastwindowtitle": "redacted",
+      "ispersistent": false,
+      "tiledLayout": "dwindle"
+    },
+    {
+      "address": "special:ipc-probe",
+      "type": "special",
+      "name": "special:ipc-probe",
+      "monitor": "WAYLAND-1",
+      "monitorID": 0,
+      "windows": 1,
+      "hasfullscreen": false,
+      "lastwindow": "0x0",
+      "lastwindowtitle": "redacted",
+      "ispersistent": false,
+      "tiledLayout": "dwindle"
+    }
+  ],
+  "clients": [
+    {
+      "address": "0x5555568ac8b0",
+      "mapped": true,
+      "hidden": false,
+      "visible": true,
+      "acceptsInput": true,
+      "at": [
+        21,
+        21
+      ],
+      "size": [
+        872,
+        688
+      ],
+      "workspace": {
+        "address": "special:ipc-probe",
+        "type": "special",
+        "name": "special:ipc-probe"
+      },
+      "floating": false,
+      "monitor": 0,
+      "class": "org.freedesktop.weston.flower",
+      "title": "redacted",
+      "initialClass": "org.freedesktop.weston.flower",
+      "initialTitle": "redacted",
+      "pid": 438739,
+      "xwayland": false,
+      "pinned": false,
+      "pinFullscreened": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "default",
+      "allowedOverFullscreen": true,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": "",
+      "contentType": "none",
+      "tearingHint": false,
+      "stableId": "18000000"
+    }
+  ],
+  "activewindow": {},
+  "workspacerules": [],
+  "gaps": {
+    "option": "general:gaps_out",
+    "css": "20 20 20 20",
+    "set": false
+  }
+}
