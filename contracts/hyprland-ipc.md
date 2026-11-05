@@ -41,7 +41,10 @@ rollback restores the compositor and consumers together.
   Named regular and special workspaces have an address/name and no numeric ID.
   Neither is workspace zero or a malformed ordinary move. Both move-event forms
   preserve the address; a display name never replaces it. Comma-bearing display data uses bounded
-  splitting. Known malformed payloads remain `Malformed`.
+  splitting. Known malformed payloads retain their original name and data in
+  `Malformed`, including known names without the `>>` separator. Unrecognized
+  unframed lines remain `Unknown`. Bare event pointers and public `0x` selectors
+  share the same nonzero 1–16 hexadecimal digit validation and normalization.
 - Compositor intake uses `try_send`. Saturation drops notifications and records
   one pending `Lagged`, delivered when room exists even if the socket is idle.
   Partial reads survive that delivery. `Lagged`/`Malformed` require resync and

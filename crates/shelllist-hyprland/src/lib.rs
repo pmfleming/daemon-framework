@@ -447,22 +447,10 @@ async fn forward_events(
         match result {
             Ok(Some(line)) => {
                 received = true;
-                if lagged {
-                    match sender.try_send(Event::Lagged) {
-                        Ok(()) => lagged = false,
-                        Err(mpsc::error::TrySendError::Full(_)) => continue,
-                        Err(mpsc::error::TrySendError::Closed(event)) => {
-                            return Err(mpsc::error::SendError(event));
-                        }
-                    }
+                if lagged && !try_send_event(sender, Event::Lagged)? {
+                    continue;
                 }
-                match sender.try_send(Event::Compositor(CompositorEvent::parse(&line))) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => lagged = true,
-                    Err(mpsc::error::TrySendError::Closed(event)) => {
-                        return Err(mpsc::error::SendError(event));
-                    }
-                }
+                lagged = !try_send_event(sender, Event::Compositor(CompositorEvent::parse(&line)))?;
             }
             Ok(None) => break None,
             Err(error) => break Some(format!("{error:#}")),
@@ -473,6 +461,19 @@ async fn forward_events(
     }
     sender.send(Event::Disconnected(cause)).await?;
     Ok(received || started.elapsed() >= RECONNECT_MIN)
+}
+
+// A full event queue signals loss; closure ends forwarding with the original
+// unsent event. Both loss notifications and compositor events use this policy.
+fn try_send_event(
+    sender: &mpsc::Sender<Event>,
+    event: Event,
+) -> Result<bool, mpsc::error::SendError<Event>> {
+    match sender.try_send(event) {
+        Ok(()) => Ok(true),
+        Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+        Err(mpsc::error::TrySendError::Closed(event)) => Err(mpsc::error::SendError(event)),
+    }
 }
 
 // Bound an unterminated line too: read_line/lines would otherwise grow forever.

@@ -1,0 +1,137 @@
+daemon-framework RQLens implementation review (2026-11-05)
+
+Scope and provenance
+Repository: /home/laufan/Projects/daemon-framework
+Clean starting HEAD: 8d4a773f7bbdd94375b8bfefb0ab9404e415544e; no preexisting edits.
+Reviewed inventory: all four shared/tooling crates, 64 authored Rust files,
+README, rqlens.toml, local-build/server/Hyprland test and contract documentation.
+No applicable AGENTS.md exists in this repository or its ancestor directories.
+Only Hyprland internals/tests and its existing contract changed; public Rust
+signatures, protocols, CLI, manifests and locks are preserved. No daemon edits.
+
+RQLens source HEAD: d137d8d8f219b4ee788935aff27115374626d2f8 (0.1.0).
+Binary: /home/laufan/Projects/rust-quality-lens/target/debug/rqlens
+SHA256: 8f9a8852860c8e63c1f23e479e90f1ced9e711224e3c57299fca6a523f0afb9f
+Toolchain: Rust/Cargo 1.95.0, LLVM 21.1.8, cargo-llvm-cov 0.8.5,
+rust-analyzer 2026-06-01; x86_64-unknown-linux-gnu, default features.
+Artifacts: target/rqlens-refactor/{before,after}/; before is chmod read-only,
+with original tracked-source archive, SHA256 manifest, source metrics and coverage.
+Separate before.toml/after.toml copy rqlens.toml, changing only absolute project
+root and output roots. Default Cargo discovery/exclusions are unchanged. No
+threshold, identity-mode, generated-source or vendor exclusion changes were made.
+Cargo.lock SHA256 (unchanged; no external framework dependency in this workspace):
+4bd311ed7e77a7b21149d7e93a453bf8a7001605fc6fdd28af9db75c665ac6aa
+
+Ranked findings and implemented work
+1. events::CompositorEvent::parse: largest production cognitive hotspot (33).
+   Unified malformed-data fallback using a local fallible parsing scope, replaced
+   repeated failure branches, removed open-window temporary Vec allocation, and
+   parsed workspace numbers once. Exact names, unknown events, raw malformed
+   fields, legacy/v2 payloads and all identity rejection guards remain intact.
+2. lib::forward_events: cognitive 18; duplicated full/closed send handling.
+   Shared try_send_event retains unsent error identity and distinguishes full
+   queues from closed receivers. Pending Lagged, idle delivery, partial-read
+   preservation, bounds, cancellation and reconnect timing remain unchanged.
+3. WindowAddress: event conversion formatted then copied a pointer solely to
+   normalize it. Shared crate-private from_digits keeps validation next to its
+   data, rejects invalid digits before allocating and normalizes in one buffer.
+   This removes a temporary allocation, not a .clone() call or public API.
+4. Tests: combined three overlapping move tests into one identity matrix; added
+   missing/truncated fields, zero/oversized/nonhex pointers across five event
+   shapes, invalid IDs, raw malformed fields, missing separators and empty valid
+   payloads. Existing exact-name, captured-event and real socket/loss tests remain.
+   Replaced two test wildcard imports with explicit imports. No new panic,
+   unsafe, allow or lint suppression was introduced.
+5. Remaining production hotspots reviewed: Client::connect (cognitive 13),
+   socket::connection (13), reconnect_events (12), bounded_watch_paths (9),
+   local-build lock/prune and policy traversal (6). Their ownership, bounds,
+   retry and security branches are meaningful and were retained. Clone candidates
+   in short Lua builders encode different guarded commands; merging them behind
+   string parameters would weaken locality/type intent. Private compositor
+   acceptance is the largest test hotspot (cognitive 53) and needs its renderer.
+
+Comparable observations (before -> after)
+Function                          SLOC     cyclomatic cognitive Halstead effort
+CompositorEvent::parse             122->103   45->44     33->20    153463.10->150937.50
+forward_events                     57->45    18->15     18->12     89104.18->52875.27
+New try_send_event                 10 lines; cyclomatic 4, cognitive 1, effort 5525.00
+New from_digits                    10 lines; cyclomatic 3, cognitive 1, effort 5526.07
+WindowAddress::parse               10->6      1->1       0->0       5568.92->726.73
+Removed event_address               4 lines; replaced, not proven dead code.
+
+All inventoried production functions: 410->411; SLOC 5386->5367;
+cognitive sum 555->538; Halstead effort sum 3358852.82->3325646.90.
+Cyclomatic sum REGRESSED 1372->1374: new helper function bases and explicit &&
+validation previously inside opaque ensure! macro syntax. Per-hotspot reductions
+are not a claim that aggregate decisions decreased. No guards were hidden or
+removed to improve that aggregate. No unused public API removal was justified;
+strict compiler/Clippy checks and symbol search support removing only the replaced
+private event_address helper, not speculative dead-code claims.
+
+Locality mean 98.3125->98.3125; leverage mean 25.46875->25.46875 (64 modules).
+Shared digit validation improves data ownership/reuse, but these module-level
+heuristics show NO numeric improvement; external consumer reuse is outside scope.
+Clone groups 31->31 (4 AST + 27 token), duplicate lines 335->335, 2.67%->2.67%.
+These are code duplication, not allocation counts. Direct .clone() source calls:
+production 48->48, tests 39->39; retained Arc/owned routing/snapshot copies have
+lifetime/ownership purposes. No measured heap/latency claim is made.
+Reliability findings 494->491, all test-scope: panic 11->8, unwrap 471->471,
+expect 12->12; observed production findings remain zero (authored syntax only).
+Escape sites 8->6 across 7->5 files: two test glob imports removed; zero unsafe
+and zero lint-suppression sites in both measurements. Other findings remain visible.
+
+Actual Rust physical lines: production 7845->7831 (-14), tests 6455->6447 (-8),
+total 14300->14278 (-22). Nonblank lines including comments: production
+7315->7300, tests 6299->6292. inventory.py classifies dedicated test paths and
+inline cfg(test) module tails; includes nested qualification/support sources.
+Static test attributes 101->100; executed passes 99->98 with two unchanged ignores.
+RQLens test-quality inventory 97->96, zero assertionless, two ignored findings;
+its syntactic inventory differs from compiled/path-included test discovery.
+Fewer test functions reflect consolidation, not discarded risk assertions.
+
+Executed LLVM coverage, same workspace/all-targets/default-feature scope:
+Lines 5929/6854 (86.5042%) -> 5945/6854 (86.7377%), +0.2334 percentage points.
+Functions 713/878 (81.2073%) -> 715/880 (81.2500%).
+Regions 9479/11318 (83.7515%) -> 9504/11329 (83.8909%).
+Instantiations 939/1535 (61.1726%) -> 941/1539 (61.1436%): slight percentage
+regression retained explicitly; generated closure/instantiation denominators vary.
+events.rs lines 212/221 (95.9276%) -> 211/211 (100%); regions
+319/331 (96.3746%) -> 328/332 (98.7952%). These reports include inline tests;
+they are not production-only coverage or evidence of all branch combinations.
+No branch/MC/DC instrumentation was requested (zero counters mean unavailable).
+
+Exact commands and verification
+All commands ran from the repository above. Build parallelism was capped at 2.
+Analyzer was built by the parent; this worker never rebuilt/edited its sources.
+Environment prefix used throughout:
+  CARGO_BUILD_JOBS=2 nix develop /home/laufan/Projects/rust-quality-lens --command
+For each phase (before/after), run this shell under that prefix:
+  for producer in hotspots locality leverage clones reliability escape-hatches test-quality; do
+    /home/laufan/Projects/rust-quality-lens/target/debug/rqlens measure "$producer" --config target/rqlens-refactor/PHASE.toml
+  done
+  python3 target/rqlens-refactor/inventory.py target/rqlens-refactor/PHASE/inventory.json
+Coverage for each phase (environment prefix plus CARGO_TARGET_DIR=target/rqlens-cov):
+  cargo llvm-cov --workspace --all-targets --locked --json --output-path target/rqlens-refactor/PHASE/coverage.json
+Verification under the same environment prefix, all PASS:
+  cargo fmt --all --check
+  cargo clippy --workspace --all-targets --locked -- -D warnings
+  cargo test --workspace --locked
+  cargo test -p shelllist-hyprland --locked
+  git diff --check
+Initial coverage attempt used unsupported --target-dir; corrected to the
+CARGO_TARGET_DIR environment variable before the successful immutable baseline.
+Final command logs: after/verification.log, after/final-verification.log,
+after/measure-final.log. Raw before coverage is before/coverage.log; final after
+coverage execution is in after/final-verification.log. No measure all was used.
+
+Limitations
+Source metrics are advisory authored syntax, partial because declare_methods!
+is unexpanded; no compiler-expanded API inventory is claimed. Auto semantic
+identity leaves unresolved references (see each envelope), so architecture means
+are observations, not complete verified identities. Test-quality is NOT coverage.
+LLVM coverage is an actual executed test run on this host. The existing ignored
+private D-Bus proxy-cost profile and nested Hyprland renderer acceptance were not
+run; no matched-performance, live compositor, desktop or deployment claim.
+Manifests/locks and public consumers were not changed. Workspace checks passed;
+consumer integration builds remain the coordinator's responsibility. No commits,
+pushes, PRs, service restarts, lockfile updates or edits outside this repository.
