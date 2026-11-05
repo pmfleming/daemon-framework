@@ -112,6 +112,17 @@
         in
         {
           inherit protocolBindings;
+          hyprlandAcceptance = pkgs.writeShellApplication {
+            name = "hyprland-ipc-acceptance";
+            runtimeInputs = (self.lib.toolchain pkgs).packages ++ [ pkgs.coreutils ];
+            text = ''
+              export WORKSPACE_TEST_WESTON="''${WORKSPACE_TEST_WESTON:-${pkgs.weston}}"
+              if (( $# == 0 )); then
+                set -- ${self.lib.workspaceSource pkgs}
+              fi
+              exec ${pkgs.bash}/bin/bash ${./tests/run-hyprland-acceptance.sh} "$@"
+            '';
+          };
           localBuild = self.lib.buildRustPackage pkgs {
             pname = "local-build";
             version = "0.1.0";
@@ -177,6 +188,10 @@
       );
 
       apps = forAllSystems (system: {
+        hyprlandAcceptance = {
+          type = "app";
+          program = "${self.packages.${system}.hyprlandAcceptance}/bin/hyprland-ipc-acceptance";
+        };
         localBuild = {
           type = "app";
           program = "${self.packages.${system}.localBuild}/bin/local-build";

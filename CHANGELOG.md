@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Document the complete Hyprland IPC contract and add opt-in Nix-wired private
+  acceptance. Compile every Lua builder without effects, construct dispatchers
+  without dispatch, and exercise live pinned replacement/state/prefix guards
+  and special-workspace event decoding. Remove unused `guarded_close`.
+
 - Make the shared connect/exchange deadline configurable and back off reconnects
   from one to eight seconds, resetting after a healthy stream. Add prefix-scoped
   reference release for bar journal recovery after pin-before-admission crashes.

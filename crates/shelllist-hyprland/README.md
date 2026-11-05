@@ -12,8 +12,8 @@ Hyprland dependency to `shelllist-daemon-core` or `shelllist-daemon-tokio`.
 Imported from the standalone `shelllist-hyprland` repository at commit
 `61376dd84a0a8f5edef2da02b11b36cd0e3edbf4` ("Phase 4: resolve compositor work
 areas and workspace rules in Rust"). The package name, version and public API
-are unchanged. Rust source/tests are copied unchanged; package metadata now
-inherits workspace settings. The original repository is retained as the
+were unchanged at import. Rust source/tests were copied unchanged; package
+metadata now inherits workspace settings. The original repository is retained as the
 historical archive, not a build input. Future changes belong in this workspace.
 
 Treat the framework, app/bar consumers and downstream Shelllist/desktop input
@@ -129,3 +129,41 @@ observation-based confirmation. Its integration tests keep exercising those guar
 
 Other domain models remain in their owning daemons. Shelllist keeps QScreen size,
 pixel clamping, window placement and presentation-specific layer rules.
+
+
+### Workspace operations and read models
+
+`workspace::snapshot` reads exact-session monitors, workspaces and clients in one
+batch. `Client::status` batches workspaces, monitors and active window; an empty
+active-window object is None. `active_workspace` and `options` are typed/validated
+read adapters. Display fields default; window address, PID and workspace remain
+required, and absent focus rank stays i64::MAX. Special workspaces keep their
+name/address with no number. Do not invent workspace zero for allocation.
+
+`workspace` supplies guarded focus, follow, move, pin, close and replacement.
+Guards recheck PID, mapping, workspace, focus intent and destination ownership in
+one compositor turn. Pinning retains an exact weak window identity; address reuse
+cannot authorize closing another object. `pinned_state` distinguishes Present,
+Gone, Moved and Lost only from explicit compositor results; transport uncertainty
+remains an error. `release_window` and `release_prefix` forget references without
+closing windows. Prefix ownership and journal fencing belong to the consumer.
+Bar uses its own namespace to recover orphaned references at journal load.
+
+The complete [Hyprland IPC contract](../../contracts/hyprland-ipc.md) describes
+targeting, errors, acknowledgement, guards, decoding and event loss. Unit tests
+run in default CI. Before each coordinated release, run the private renderer
+acceptance from the framework root:
+
+```sh
+nix run --no-write-lock-file .#hyprlandAcceptance -- "$PWD"
+```
+
+The Nix app supplies Rust and Weston test applications. It defaults to the current
+installed Hyprland binary and derives the parent Wayland socket from the session;
+`WORKSPACE_TEST_HYPRLAND`, `WORKSPACE_TEST_WESTON` and
+`WORKSPACE_TEST_PARENT_DISPLAY` may select explicit test tools/renderer. All
+mutations target private child compositors; no production service is restarted.
+The test compiles every builder without running it, constructs dispatchers
+without dispatch, and checks real pinned replacement/state/prefix behavior and
+live JSON/event decoding on 0.57.1. Physical hardware recovery and the real
+compositor restart remain separate user-run rollout checks.

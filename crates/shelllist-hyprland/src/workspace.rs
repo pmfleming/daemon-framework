@@ -225,13 +225,6 @@ pub fn quote(value: &str) -> Result<String> {
     Ok(serde_json::to_string(value)?)
 }
 
-pub fn guarded_close(address: &str, pid: u32, workspace: i64) -> Result<Lua> {
-    let guard = window_guard(address, pid, workspace)?;
-    Ok(Lua(format!(
-        "{guard} local r=hl.dispatch(hl.dsp.window.close({{window=w}})); assert(r.ok,r.error)"
-    )))
-}
-
 pub fn focus_window(address: &str, pid: u32, workspace: i64) -> Result<Lua> {
     let guard = window_guard(address, pid, workspace)?;
     Ok(Lua(format!(
@@ -463,6 +456,69 @@ fn window_guard(address: &str, pid: u32, workspace: i64) -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pinned_builders_guard_identity_ownership_and_focus_before_effects() {
+        for bad in ["", "a;b", "a'", "a\n"] {
+            assert!(pin_window(bad, "0x123", 42, 6).is_err());
+            assert!(release_window(bad).is_err());
+            assert!(release_prefix(bad).is_err());
+        }
+        let pin = pin_window("probe", "0x123", 42, 6).unwrap();
+        assert!(pin.find("stale window").unwrap() < pin.find("duplicate token").unwrap());
+        let focus = focus_window("0x123", 42, 6).unwrap();
+        assert!(focus.find("stale window").unwrap() < focus.find("hl.dispatch").unwrap());
+        let follow = follow_window("0x123", 42, 6, "DP-1", 1).unwrap();
+        assert!(follow.find("focus intent expired").unwrap() < follow.find("hl.dispatch").unwrap());
+        let window = Window {
+            address: "0x456".into(),
+            pid: 42,
+            workspace: WorkspaceRef {
+                id: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let replace = replace_pinned("probe", "0x123", &window, 6, "DP-1").unwrap();
+        assert!(
+            replace
+                .find("predecessor still mapped or identity lost")
+                .unwrap()
+                < replace.find("hl.dispatch").unwrap()
+        );
+        assert!(replace.contains("foreign destination"));
+        assert!(replace.contains("follow=false"));
+        let release = release_prefix("owned-").unwrap();
+        assert!(release.contains("key:sub(1,"));
+        assert!(!release.contains("hl.dispatch"));
+    }
+
+    #[tokio::test]
+    async fn pinned_observation_classifies_only_explicit_rejections_as_window_states() {
+        const QUERY: &str = "eval assert(__shelllist_window_refs and __shelllist_window_refs[\"probe\"]~=nil,'shelllist-handoff-lost'); local w=hl.get_window('address:0x123'); assert(w and w.mapped and __shelllist_window_refs[\"probe\"]==w,'shelllist-handoff-gone'); assert(w.pid==42 and w.workspace and w.workspace.id==6,'shelllist-handoff-moved')";
+        for (reply, expected) in [
+            ("ok", Some(PinnedState::Present)),
+            ("error: shelllist-handoff-gone", Some(PinnedState::Gone)),
+            ("error: shelllist-handoff-moved", Some(PinnedState::Moved)),
+            ("error: shelllist-handoff-lost", Some(PinnedState::Lost)),
+            ("other failure", None),
+            ("", None),
+        ] {
+            let (_root, client, server) = crate::tests::command_server(QUERY, reply).await;
+            let result = pinned_state(&client, "probe", "0x123", 42, 6).await;
+            if let Some(expected) = expected {
+                assert_eq!(result.unwrap(), expected);
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<crate::IpcError>()
+                        .is_some()
+                );
+            }
+            server.await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn status_is_one_batch_and_empty_active_window_is_absent() {
         let reply = r#"[{"id":3,"monitor":"DP-1","windows":1,"name":"three","hasfullscreen":true,"lastwindowtitle":"title"}]
@@ -502,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_snapshots_and_work_areas_accept_both_workspace_shapes() {
+    fn captured_0571_snapshots_preserve_numbered_and_special_workspaces() {
         for (version, special, text) in [
             (
                 "0.57.1",
@@ -573,11 +629,11 @@ mod tests {
     #[test]
     fn close_never_falls_back_to_active_window_or_accepts_code() {
         for address in ["", "active", "0x", "0x1');evil()", "0xé"] {
-            assert!(guarded_close(address, 1, 6).is_err());
+            assert!(close_pinned("probe", address, 1, 6).is_err());
         }
-        assert!(guarded_close("0xabc", 0, 6).is_err());
-        assert!(guarded_close("0xabc", 1, -1).is_err());
-        let command = guarded_close("0xabc", 42, 6).unwrap();
+        assert!(close_pinned("probe", "0xabc", 0, 6).is_err());
+        assert!(close_pinned("probe", "0xabc", 1, -1).is_err());
+        let command = close_pinned("probe", "0xabc", 42, 6).unwrap();
         assert!(command.contains("w.pid==42 and w.workspace and w.workspace.id==6"));
         assert!(command.ends_with("assert(r.ok,r.error)"));
         assert!(guarded_move("0xabc", 42, 6, 0).is_err());

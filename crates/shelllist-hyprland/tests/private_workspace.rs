@@ -150,6 +150,12 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let client = client.expect("private Hyprland IPC did not start");
+    compile_builders_without_effects(&client).await;
+    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(1024);
+    let event_task = tokio::spawn(client.clone().watch_events(event_sender));
+    assert!(
+        matches!(event_receiver.recv().await, Some(shelllist_hyprland::Event::Connected { instance }) if Some(instance.as_str()) == client.instance_signature().unwrap())
+    );
     let initial = workspace::snapshot(&client).await.unwrap();
     assert!(!initial.monitors.is_empty());
     let monitor = &initial.monitors[0];
@@ -225,6 +231,44 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
         .is_err()
     );
     assert!(app.0.try_wait().unwrap().is_none());
+    for token in ["retained-ref", "acceptance-one-a", "acceptance-two-a"] {
+        workspace::execute(
+            &client,
+            &workspace::pin_window(token, &target.address, target.pid, 7).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    workspace::execute(
+        &client,
+        &workspace::release_prefix("acceptance-one-").unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        workspace::pinned_state(&client, "acceptance-one-a", &target.address, target.pid, 7)
+            .await
+            .unwrap(),
+        workspace::PinnedState::Lost
+    );
+    assert_eq!(
+        workspace::pinned_state(&client, "acceptance-two-a", &target.address, target.pid, 7)
+            .await
+            .unwrap(),
+        workspace::PinnedState::Present
+    );
+    assert_eq!(
+        workspace::pinned_state(&client, "retained-ref", &target.address, target.pid, 6)
+            .await
+            .unwrap(),
+        workspace::PinnedState::Moved
+    );
+    workspace::execute(
+        &client,
+        &workspace::release_window("acceptance-two-a").unwrap(),
+    )
+    .await
+    .unwrap();
     workspace::execute(
         &client,
         &workspace::close_pinned(&token, &target.address, target.pid, 7).unwrap(),
@@ -248,6 +292,93 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
         .await
         .is_err()
     );
+    assert_eq!(
+        workspace::pinned_state(&client, "retained-ref", &target.address, target.pid, 7)
+            .await
+            .unwrap(),
+        workspace::PinnedState::Gone
+    );
+    let mut replacement = spawn(
+        &weston.join("bin/weston-flower"),
+        &[],
+        &root,
+        &display,
+        "replacement.log",
+    );
+    let mut candidate = None;
+    for _ in 0..100 {
+        candidate = workspace::snapshot(&client)
+            .await
+            .unwrap()
+            .windows
+            .into_iter()
+            .find(|w| w.pid == replacement.0.id() && w.mapped);
+        if candidate.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let candidate = candidate.expect("replacement did not map");
+    workspace::execute(
+        &client,
+        &workspace::replace_pinned(
+            "retained-ref",
+            &target.address,
+            &candidate,
+            7,
+            &monitor.name,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        workspace::pinned_state(
+            &client,
+            "retained-ref",
+            &candidate.address,
+            candidate.pid,
+            7
+        )
+        .await
+        .unwrap(),
+        workspace::PinnedState::Present
+    );
+    workspace::execute(
+        &client,
+        &workspace::follow_window(&candidate.address, candidate.pid, 7, &monitor.name, 6).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        workspace::execute(
+            &client,
+            &workspace::follow_window(&candidate.address, candidate.pid, 7, &monitor.name, 6)
+                .unwrap()
+        )
+        .await
+        .is_err(),
+        "stale follow intent must fail"
+    );
+    workspace::execute(
+        &client,
+        &workspace::close_pinned("retained-ref", &candidate.address, candidate.pid, 7).unwrap(),
+    )
+    .await
+    .unwrap();
+    for _ in 0..100 {
+        if replacement.0.try_wait().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(replacement.0.try_wait().unwrap().is_some());
+    workspace::execute(
+        &client,
+        &shelllist_hyprland::lua::focus_workspace(6, false).unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         client
             .request_exact("output create headless")
@@ -331,4 +462,154 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
             .any(|w| w.id.is_none_or(|id| id < 0))
     );
     assert!(!client.work_areas().await.unwrap().is_empty());
+    let special_app = spawn(
+        &weston.join("bin/weston-flower"),
+        &[],
+        &root,
+        &display,
+        "special.log",
+    );
+    let mut window = None;
+    for _ in 0..100 {
+        window = workspace::snapshot(&client)
+            .await
+            .unwrap()
+            .windows
+            .into_iter()
+            .find(|w| w.pid == special_app.0.id() && w.mapped);
+        if window.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let window = window.expect("special application did not map");
+    workspace::execute(
+        &client,
+        &shelllist_hyprland::lua::move_window(&window.address, "6").unwrap(),
+    )
+    .await
+    .unwrap();
+    workspace::execute(
+        &client,
+        &shelllist_hyprland::lua::move_window(&window.address, "special:ipc-probe").unwrap(),
+    )
+    .await
+    .unwrap();
+    let observed = workspace::snapshot(&client).await.unwrap();
+    let moved = observed
+        .windows
+        .iter()
+        .find(|w| w.pid == special_app.0.id())
+        .unwrap();
+    assert!(moved.workspace.special);
+    assert_eq!(moved.workspace.id, None);
+    let status = client.status().await.unwrap();
+    assert!(status.workspaces.iter().any(|w| w.id.is_none()));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match event_receiver.recv().await.unwrap() {
+                shelllist_hyprland::Event::Compositor(
+                    shelllist_hyprland::CompositorEvent::WindowMoved { workspace, .. },
+                ) if workspace.special => break,
+                shelllist_hyprland::Event::Compositor(
+                    shelllist_hyprland::CompositorEvent::Malformed { name, data },
+                ) => panic!("malformed live event {name}>>{data}"),
+                shelllist_hyprland::Event::Lagged => panic!("acceptance event capture overflowed"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(event_receiver);
+    event_task.await.unwrap();
+}
+
+async fn compile_builders_without_effects(client: &Client) {
+    use shelllist_hyprland::{
+        lua,
+        monitor::{self, Mode, Position, Rule},
+    };
+    assert_eq!(client.capabilities().await.unwrap().version, "0.57.1");
+    let before = client
+        .request_exact("[[BATCH]]j/workspaces;j/clients")
+        .await
+        .unwrap();
+    let window = workspace::Window {
+        address: "0x456".into(),
+        pid: 42,
+        workspace: workspace::WorkspaceRef {
+            id: Some(6),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let sources = [
+        lua::focus_workspace(6, true).unwrap(),
+        lua::focus_window("0x123").unwrap(),
+        lua::close_window("0x123").unwrap(),
+        lua::move_window("0x123", "6").unwrap(),
+        lua::toggle_special("compile-only").unwrap(),
+        lua::configure(&std::collections::BTreeMap::from([(
+            "cursor:no_warps".into(),
+            serde_json::json!(true),
+        )]))
+        .unwrap(),
+        monitor::command("TEST-1", Rule::Disable).unwrap(),
+        monitor::command(
+            "TEST-1",
+            Rule::Enable {
+                mode: Mode::Exact("1920x1080@60"),
+                position: Position::Exact { x: 0, y: 0 },
+                scale: 1.0,
+                transform: Some(0),
+                mirror: "",
+            },
+        )
+        .unwrap(),
+        workspace::focus_window("0x123", 42, 6).unwrap(),
+        workspace::follow_window("0x123", 42, 6, "TEST-1", 1).unwrap(),
+        workspace::pin_window("compile-only", "0x123", 42, 6).unwrap(),
+        workspace::close_pinned("compile-only", "0x123", 42, 6).unwrap(),
+        workspace::release_window("compile-only").unwrap(),
+        workspace::release_prefix("compile-").unwrap(),
+        workspace::replace_pinned("compile-only", "0x123", &window, 7, "TEST-1").unwrap(),
+        workspace::select_local("TEST-1", 1, 6, true, false).unwrap(),
+        workspace::select_local("TEST-1", 1, 6, false, true).unwrap(),
+        workspace::focus_local("TEST-1", 1, 6, true).unwrap(),
+        workspace::guarded_move("0x123", 42, 6, 7).unwrap(),
+        workspace::move_local("0x123", 42, 6, 7, "TEST-1").unwrap(),
+    ];
+    for source in sources {
+        let quoted = serde_json::to_string(&source.to_string()).unwrap();
+        shelllist_hyprland::ack(
+            &client
+                .request_exact(&format!("eval assert(load({quoted}))"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+    }
+    for dispatcher in [
+        "hl.dsp.focus({workspace=6})",
+        "hl.dsp.window.move({workspace=6,window='address:0x123'})",
+        "hl.dsp.window.close({window='address:0x123'})",
+        "hl.dsp.workspace.toggle_special('compile-only')",
+    ] {
+        shelllist_hyprland::ack(
+            &client
+                .request_exact(&format!("eval return {dispatcher}"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        client
+            .request_exact("[[BATCH]]j/workspaces;j/clients")
+            .await
+            .unwrap(),
+        before,
+        "compile/constructor checks dispatched effects"
+    );
 }

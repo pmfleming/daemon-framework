@@ -302,4 +302,18 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn numeric_display_names_do_not_replace_workspace_addresses() {
+        // 0.57.1 Window.cpp emits addressableName in both move forms; only v2
+        // appends displayName. Workspace 7 may legitimately display as "6".
+        for line in ["movewindow>>123,7", "movewindowv2>>123,7,6"] {
+            let CompositorEvent::WindowMoved { workspace, .. } = CompositorEvent::parse(line)
+            else {
+                panic!("expected move");
+            };
+            assert_eq!(workspace.id, Some(7));
+            assert!(!workspace.special);
+        }
+    }
 }
