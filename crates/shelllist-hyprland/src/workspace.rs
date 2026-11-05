@@ -5,21 +5,27 @@ use crate::{Client, Lua};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Hash)]
 pub struct Workspace {
     pub id: Option<i64>,
     pub monitor: String,
     pub windows: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, rename = "hasfullscreen")]
+    pub has_fullscreen: bool,
+    #[serde(default, rename = "lastwindowtitle")]
+    pub last_window_title: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Hash)]
 pub struct WorkspaceId {
     pub id: Option<i64>,
 }
 
 /// Workspace identity across numbered and special workspaces. Hyprland 0.57
 /// omits `id` for special workspaces; never interpret absence as workspace zero.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Hash)]
 #[serde(from = "WorkspaceRefWire")]
 pub struct WorkspaceRef {
     pub id: Option<i64>,
@@ -56,24 +62,89 @@ impl From<WorkspaceRefWire> for WorkspaceRef {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Monitor {
+    pub id: i64,
     pub name: String,
     pub focused: bool,
     #[serde(rename = "activeWorkspace")]
     pub active_workspace: WorkspaceId,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Hash)]
 pub struct Window {
     pub address: String,
     pub pid: u32,
     pub workspace: WorkspaceRef,
+    #[serde(default = "mapped")]
     pub mapped: bool,
+    #[serde(default)]
+    pub title: String,
+    #[serde(rename = "focusHistoryID", default = "unfocused")]
+    pub focus_rank: i64,
+    #[serde(default)]
+    pub floating: bool,
+    #[serde(default)]
+    pub fullscreen: i8,
     #[serde(default, rename = "class")]
     pub class: String,
     #[serde(default, rename = "initialClass")]
     pub initial_class: String,
+}
+impl Default for Window {
+    fn default() -> Self {
+        Self {
+            address: String::new(),
+            pid: 0,
+            workspace: WorkspaceRef::default(),
+            mapped: true,
+            title: String::new(),
+            focus_rank: i64::MAX,
+            floating: false,
+            fullscreen: 0,
+            class: String::new(),
+            initial_class: String::new(),
+        }
+    }
+}
+
+const fn mapped() -> bool {
+    true
+}
+const fn unfocused() -> i64 {
+    i64::MAX
+}
+
+/// One compositor turn, without attaching daemon policy or session journals.
+#[derive(Debug, Clone)]
+pub struct Status {
+    pub workspaces: Vec<Workspace>,
+    pub monitors: Vec<Monitor>,
+    pub active_window: Option<Window>,
+}
+
+impl Status {
+    pub fn parse(reply: &str) -> Result<Self> {
+        let mut parts = serde_json::Deserializer::from_str(reply);
+        let workspaces =
+            Deserialize::deserialize(&mut parts).context(crate::IpcError::InvalidReply)?;
+        let monitors =
+            Deserialize::deserialize(&mut parts).context(crate::IpcError::InvalidReply)?;
+        let active: serde_json::Value =
+            Deserialize::deserialize(&mut parts).context(crate::IpcError::InvalidReply)?;
+        parts.end().context(crate::IpcError::InvalidReply)?;
+        let active_window = if active.is_null() || active.as_object().is_some_and(|v| v.is_empty())
+        {
+            None
+        } else {
+            Some(serde_json::from_value(active).context(crate::IpcError::InvalidReply)?)
+        };
+        Ok(Status {
+            workspaces,
+            monitors,
+            active_window,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -133,10 +204,10 @@ pub async fn pinned_snapshot(
 
 fn parse_snapshot(session: String, reply: &str) -> Result<Snapshot> {
     let mut parts = serde_json::Deserializer::from_str(reply);
-    let monitors = Deserialize::deserialize(&mut parts)?;
-    let workspaces = Deserialize::deserialize(&mut parts)?;
-    let windows = Deserialize::deserialize(&mut parts)?;
-    parts.end()?;
+    let monitors = Deserialize::deserialize(&mut parts).context(crate::IpcError::InvalidReply)?;
+    let workspaces = Deserialize::deserialize(&mut parts).context(crate::IpcError::InvalidReply)?;
+    let windows = Deserialize::deserialize(&mut parts).context(crate::IpcError::InvalidReply)?;
+    parts.end().context(crate::IpcError::InvalidReply)?;
     Ok(Snapshot {
         session,
         monitors,
@@ -384,6 +455,35 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn status_is_one_batch_and_empty_active_window_is_absent() {
+        let reply = r#"[{"id":3,"monitor":"DP-1","windows":1,"name":"three","hasfullscreen":true,"lastwindowtitle":"title"}]
+            [{"id":0,"name":"DP-1","focused":true,"activeWorkspace":{"id":3}}]
+            {}"#;
+        let (_root, client, server) =
+            crate::tests::command_server("[[BATCH]]j/workspaces;j/monitors;j/activewindow", reply)
+                .await;
+        let status = client.status().await.unwrap();
+        assert!(status.active_window.is_none());
+        assert_eq!(status.workspaces[0].name, "three");
+        assert!(status.workspaces[0].has_fullscreen);
+        assert_eq!(status.workspaces[0].last_window_title, "title");
+        server.await.unwrap();
+        let window: Window = serde_json::from_str(
+            r#"{"address":"not-a-selector","pid":42,"workspace":{"id":3,"name":"3"}}"#,
+        )
+        .unwrap();
+        assert_eq!(window.address, "not-a-selector"); // consumer filters, not snapshot-wide failure
+        assert_eq!(window.focus_rank, i64::MAX);
+        assert_eq!(Window::default().focus_rank, i64::MAX);
+        assert!(window.mapped);
+        assert!(
+            serde_json::from_str::<Window>(r#"{"address":"0x123","workspace":{"id":3}}"#).is_err()
+        );
+        assert!(Status::parse("[] [] {\"address\":\"0x123\"}").is_err());
+        assert!(Status::parse("[] [] {} trailing").is_err());
+    }
+
+    #[tokio::test]
     async fn pin_snapshot_rejects_batch_delimiters_before_connecting() {
         let client = Client::new("/unused".into(), Some("test".into()));
         let error = pinned_snapshot(&client, "DP;j/x", 6, "probe")
@@ -395,16 +495,6 @@ mod tests {
     #[test]
     fn captured_snapshots_and_work_areas_accept_both_workspace_shapes() {
         for (version, special, text) in [
-            (
-                "0.56.2",
-                false,
-                include_str!("../tests/fixtures/0.56.2/regular.json"),
-            ),
-            (
-                "0.56.2",
-                true,
-                include_str!("../tests/fixtures/0.56.2/special.json"),
-            ),
             (
                 "0.57.1",
                 false,

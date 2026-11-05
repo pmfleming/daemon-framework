@@ -145,16 +145,30 @@ impl Client {
         }
     }
 
+    pub async fn status(&self) -> Result<workspace::Status> {
+        workspace::Status::parse(
+            &self
+                .request("[[BATCH]]j/workspaces;j/monitors;j/activewindow")
+                .await?,
+        )
+    }
+
+    pub async fn active_workspace(&self) -> Result<workspace::WorkspaceRef> {
+        serde_json::from_str(&self.request("j/activeworkspace").await?)
+            .context(IpcError::InvalidReply)
+    }
+
     pub async fn work_areas(
         &self,
     ) -> Result<std::collections::BTreeMap<String, work_area::Insets>> {
         let reply = self.request("[[BATCH]]j/monitors;j/workspaces;j/workspacerules;j/clients;j/getoption general:gaps_out").await?;
-        work_area::parse_work_areas(&reply)
+        work_area::parse_work_areas(&reply).context(IpcError::InvalidReply)
     }
 
     /// Read animation preferences through the same bounded native IPC transport.
     pub async fn preferences(&self) -> Result<preferences::Preferences> {
         preferences::parse(&self.request("j/getoption animations:enabled").await?)
+            .context(IpcError::InvalidReply)
     }
 
     pub async fn event_socket(&self) -> Result<UnixStream> {

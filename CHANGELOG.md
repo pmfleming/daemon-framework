@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Share window/workspace display fields and a single-turn status batch across
+  app/bar and portal consumers. Preserve optional special-workspace identity,
+  required snapshot identity, default unfocused rank, per-window address
+  filtering and explicit absence of an active window.
+
 - Use typed Lua builders and one checked execution path for all Rust compositor
   mutations. Require Lua configuration, Hyprland 0.57.1 and the builder API set;
   cache only successful checks for the exact client session. Remove legacy
