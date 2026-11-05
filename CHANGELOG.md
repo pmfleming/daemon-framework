@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Validate the coordinated Phase 1S upgrade preparation against Hyprland 0.57.1
+  and Quickshell 0.3.2 on the approved Qt. Record local commits, checks, display
+  stack versions and deployment blockers; activation waits for user approval.
+
 - Accept Hyprland 0.57 special workspaces without numeric IDs, preserving their
   names/addresses and resolving geometry by identity without treating absence as
   workspace zero. Decode bounded IPC text lossily while retaining JSON errors;
