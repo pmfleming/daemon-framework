@@ -69,8 +69,9 @@ impl WorkspaceRef {
     /// Prefix named addresses so reserved names such as `next` remain literal.
     pub fn selector(&self) -> Result<String> {
         if !self.special
-            && let Some(id) = self.id.filter(|id| *id > 0)
+            && let Some(id) = self.id
         {
+            ensure!(id > 0, "invalid numbered workspace");
             return Ok(id.to_string());
         }
         let address = self
@@ -89,6 +90,11 @@ impl WorkspaceRef {
             );
             Ok(address.into())
         } else {
+            ensure!(
+                address.parse::<i64>().is_err()
+                    && !address.bytes().all(|byte| byte.is_ascii_digit()),
+                "named workspace cannot have a numeric address"
+            );
             Ok(format!("name:{address}"))
         }
     }
@@ -570,6 +576,28 @@ mod tests {
             "7"
         );
         assert!(WorkspaceRef::default().selector().is_err());
+        for reference in [
+            WorkspaceRef {
+                id: Some(0),
+                address: Some("0".into()),
+                ..Default::default()
+            },
+            WorkspaceRef {
+                id: Some(-1),
+                address: Some("project".into()),
+                ..Default::default()
+            },
+            WorkspaceRef {
+                address: Some("0".into()),
+                ..Default::default()
+            },
+            WorkspaceRef {
+                address: Some("18446744073709551615".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(reference.selector().is_err());
+        }
     }
 
     #[tokio::test]

@@ -21,3 +21,10 @@ Validation: full locked framework tests passed, then all 33 Hyprland unit tests
 and warning-denied workspace/all-target clippy passed after the geometry addition.
 Private acceptance passed with named read, event, selector and pin-guard checks.
 Formatting passes. Logs: `/tmp/framework-ipc-review-{named,named-geometry,private}.log`.
+
+Final audit additionally preserves rejection of zero/negative/overflowing numeric
+move identities. Numberless named support must not reinterpret malformed numeric
+identities as names. Selector tests reject those inputs before portal launch or
+mutation. All 34 Hyprland tests and warning-denied clippy pass after this guard.
+The README now agrees with the contract that prefix recovery runs before first
+pin admission, not at journal load.

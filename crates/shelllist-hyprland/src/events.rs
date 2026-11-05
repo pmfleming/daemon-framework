@@ -92,7 +92,10 @@ impl CompositorEvent {
                 };
                 let special = identity.starts_with("special:");
                 let id = identity.parse::<i64>().ok().filter(|id| *id > 0);
-                if identity == "special:" {
+                if identity == "special:"
+                    || identity.parse::<i64>().is_ok_and(|id| id <= 0)
+                    || (identity.bytes().all(|byte| byte.is_ascii_digit()) && id.is_none())
+                {
                     return malformed();
                 }
                 Self::WindowMoved {
@@ -272,6 +275,9 @@ mod tests {
             "movewindowv2>>bad!,1,one",
             "movewindowv2>>123,1",
             "movewindowv2>>123,special:,name",
+            "movewindowv2>>123,0,zero",
+            "movewindowv2>>123,-2,negative",
+            "movewindowv2>>123,18446744073709551615,overflow",
             "openwindow>>",
             "windowtitlev2>>123",
             "changeworkspaceid>>a,2",

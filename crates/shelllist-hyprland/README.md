@@ -148,7 +148,8 @@ cannot authorize closing another object. `pinned_state` distinguishes Present,
 Gone, Moved and Lost only from explicit compositor results; transport uncertainty
 remains an error. `release_window` and `release_prefix` forget references without
 closing windows. Prefix ownership and journal fencing belong to the consumer.
-Bar uses its own namespace to recover orphaned references at journal load.
+Bar uses its own namespace to recover orphaned references just before the first
+new pin is admitted; loading a journal does not require mutation capabilities.
 
 The complete [Hyprland IPC contract](../../contracts/hyprland-ipc.md) describes
 targeting, errors, acknowledgement, guards, decoding and event loss. Unit tests
