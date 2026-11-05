@@ -58,6 +58,8 @@ rollback restores the compositor and consumers together.
   `capabilities::LUA_APIS`. Only production builders contribute requirements;
   special-workspace toggling is an acceptance-only check. The probe checks
   function types without dispatching.
+  Valid prerelease/build suffixes are accepted; a prerelease of 0.57.1 itself
+  remains below the release floor. The API probe is always required.
   Only successful checks are cached, bound to that immutable exact-session client.
   Failed/transient checks are retried on the next call. Typed reads remain usable
   independently of mutation capabilities.

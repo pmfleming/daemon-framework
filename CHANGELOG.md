@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Parse valid Hyprland prerelease/build suffixes without dropping the numeric
+  minimum, malformed-version checks or runtime API validation.
+
 - Keep the special-workspace toggle helper and its API check in private
   acceptance; unused test APIs no longer gate production mutations.
 
