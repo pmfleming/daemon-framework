@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Replace raw Hyprland event strings with typed, exact-name notifications and
+  explicit loss delivery. Custom clients keep their session identity; diagnostic
+  discovery never rebinds reads or commands. App/bar daemons drain normal
+  shutdown and return an error when their configured compositor is replaced.
+
 - Add downcastable IPC delivery errors, exact single-command acknowledgements,
   validated window addresses and client-owned event watching. Connection and
   exchange share one deadline; configured signatures never redirect requests.

@@ -1,4 +1,4 @@
-use super::work_area::{geometry_event, parse_work_areas};
+use super::work_area::parse_work_areas;
 use serde_json::{Value, json};
 
 fn fixture() -> [Value; 5] {
@@ -91,9 +91,9 @@ fn logical_reservations_css_gaps_and_ordered_rules() {
     let mut parts = fixture();
     parts[0][0]["scale"] = json!(0);
     assert!(parse_work_areas(&text(&parts)).is_err());
-    assert!(geometry_event("configreloaded>>"));
-    assert!(geometry_event("togglegroup>>1"));
-    assert!(!geometry_event("activewindow>>title"));
+    assert!(crate::CompositorEvent::parse("configreloaded>>").invalidates_geometry());
+    assert!(crate::CompositorEvent::parse("togglegroup>>1").invalidates_geometry());
+    assert!(!crate::CompositorEvent::parse("activewindow>>title").invalidates_geometry());
 }
 
 #[test]

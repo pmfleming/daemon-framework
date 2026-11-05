@@ -28,53 +28,60 @@ workspace CI and Shelllist's `frameworkWorkspace` check include these tests.
 
 ## API and ownership
 
-Discovery prefers the requested instance across the runtime and legacy roots,
-then tries other socket candidates in sorted runtime-root / legacy-root order.
-Stale sockets that refuse connections are skipped. Commands are never replayed
-on another instance after a connection succeeds. Candidates must be sockets owned
-by the effective user, inside owned instance directories that are not group- or
-world-writable; symlink sockets and instance directories are rejected. Connected
-peer credentials must also match before commands are sent or events are read.
-This prevents cross-user impersonation, not impersonation by the same user.
+A configured instance signature pins reads, event sockets and mutations to that
+instance across the runtime and legacy roots. Discovery (sorted runtime-root,
+then legacy-root order) applies only when no signature is configured.
+`request_exact` additionally requires a signature. Invalid or non-Unicode
+signatures fail explicitly. Socket ownership, protected instance directories,
+symlink rejection and connected peer credentials are checked before exchange.
+Commands are never replayed after a connection succeeds.
 
-`Client::request` uses the command socket directly with one two-second deadline
-covering discovery, connection, writing, and reading (16 MiB reply limit).
-For state-changing commands, use `Client::request_exact`: it requires a valid
-instance signature and only tries that instance in the runtime and legacy roots.
-A missing/stale target fails rather than mutating another session. It uses the
-same deadline and never replays a command after connection.
-Malformed or non-Unicode `HYPRLAND_INSTANCE_SIGNATURE` values cause all IPC
-operations to fail explicitly instead of enabling discovery fallback.
-`Client::instance_signature` lets callers inspect/validate configuration early;
-constructors remain infallible. An absent signature still permits ordinary discovery.
-Event connections include discovery in the same deadline; event lines are capped
-at 64 KiB including their terminator, even when a peer never sends a newline.
-Replies and event text replace invalid UTF-8 with U+FFFD; invalid JSON still
-fails at the typed read. Size limits apply to raw bytes before decoding.
-Oversized events disconnect and reconnect with normal backoff.
-Idle event streams have no read timeout, and receiver closure cancels all phases.
-`watch_events_detailed` reports `Connected`, `Disconnected(Option<String>)`,
-`ConnectFailed(String)`, and raw `Message` events. Disconnections carry a cause
-for read/protocol errors, or `None` for EOF. Connection failures are reported even
-at startup; identical consecutive failures are suppressed until the cause changes
-or a connection succeeds. Consumers can distinguish failure from a quiet stream
-and adapt fallback polling without receiving repeated identical errors.
-Reconnection is delayed by one second, including accept-then-EOF failures; closing
-the receiver stops the watcher. Downstream event matches must handle
-`ConnectFailed` and the new `Disconnected` payload. The original unit-valued
-`watch_events` API remains available and also wakes on reported failures.
+Discovery, connection and command exchange share one two-second deadline.
+Downcast `anyhow::Error` to `IpcError` to distinguish `NotDelivered`,
+`OutcomeUnknown`, `Rejected`, `InvalidReply` and `SessionGone`. A timeout before
+connection is not delivered; an exchange timeout or I/O failure has an unknown
+outcome. A malformed/oversized reply is not permission to retry a mutation.
+`ack` requires exactly `ok` after trimming whitespace; the pin-and-JSON batch
+is explicitly a separate protocol. If the configured socket disappears,
+diagnostic discovery can report a different live instance as `SessionGone`;
+it sends no request and never rebinds the client. No live alternative remains
+an ordinary connection failure. Daemons must drain their normal shutdown path
+and exit non-zero on `SessionGone`, so systemd can restart with current session
+environment instead of continuing journals under another session identity.
+
+`Client::watch_events(self, sender)` preserves custom client configuration.
+`Event::Connected { instance }` identifies the socket reached; other controls
+are `Disconnected(Option<String>)`, `ConnectFailed(String)`, `SessionGone` and
+`Lagged`. Compositor notifications use `Event::Compositor(CompositorEvent)`.
+Known v1/v2 names share variants; moved windows carry validated `WindowAddress`
+and `WorkspaceRef` identities. Special workspaces have no numeric ID. Unknown
+names remain `Unknown`, and malformed known payloads remain `Malformed`.
+Consumers resynchronize on `Lagged`/`Malformed` rather than trusting lost state.
+`invalidates_geometry` and `invalidates_preferences` replace raw prefix lists.
+
+Event intake uses nonblocking sends. A full consumer channel drops compositor
+notifications and delivers one pending `Lagged` when capacity becomes available,
+even if the socket then goes idle. Connection controls are never dropped.
+Receiver closure cancels connection attempts, reads, control sends and backoff.
+The reconnect delay is one second, including accept-then-EOF failures; identical
+consecutive connection failures are suppressed until their cause changes or a
+connection succeeds. Quiet healthy streams have no idle timeout.
+
+Replies are capped at 16 MiB and event frames at 64 KiB including terminators.
+Invalid UTF-8 is replaced with U+FFFD after checking raw byte limits. Invalid
+JSON still fails typed reads. Oversized frames disconnect with a protocol cause.
 
 `Client::work_areas` uses one native JSON batch and resolves workspace rules into
 monitor-keyed logical insets. Parsing, monitor selectors, window/group counts and
 rule-order semantics are tested here. Replies are bounded to 16 MiB; invalid
-snapshots fail explicitly. `work_area::geometry_event` identifies invalidating
+snapshots fail explicitly. `CompositorEvent::invalidates_geometry` identifies invalidating
 compositor events. bar-daemon owns the shared on-demand cache and subscriber
 lifetime, rather than creating a poller per UI surface.
 
 `Client::preferences` reads `animations:enabled` over the native command socket
 and returns a typed `Preferences` value. Boolean and legacy integer 0/1 replies
 are accepted; missing, malformed, contradictory or wrong-option replies fail
-instead of guessing an enabled default. `preferences::preference_event` identifies
+instead of guessing an enabled default. `CompositorEvent::invalidates_preferences` identifies
 config reloads. bar-daemon owns the shared cache, failure retry and subscription;
 Shelllist retains environment overrides and animation presentation policy.
 

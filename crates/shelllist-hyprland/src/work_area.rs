@@ -412,29 +412,3 @@ fn insets(snapshot: &Snapshot) -> BTreeMap<String, Insets> {
 pub fn parse_work_areas(text: &str) -> Result<BTreeMap<String, Insets>> {
     Ok(insets(&parse(text)?))
 }
-pub fn geometry_event(event: &str) -> bool {
-    [
-        "workspace",
-        "focusedmon",
-        "monitor",
-        "configreloaded",
-        "openlayer",
-        "closelayer",
-        "openwindow",
-        "closewindow",
-        "movewindow",
-        "changefloatingmode",
-        "fullscreen",
-        "activespecial",
-        "moveworkspace",
-        "renameworkspace",
-        "createworkspace",
-        "destroyworkspace",
-        "togglegroup",
-        "moveintogroup",
-        "moveoutofgroup",
-        "pin",
-    ]
-    .iter()
-    .any(|prefix| event.starts_with(prefix))
-}

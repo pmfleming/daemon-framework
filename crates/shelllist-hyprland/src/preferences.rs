@@ -34,18 +34,9 @@ pub(super) fn parse(reply: &str) -> Result<Preferences> {
     Ok(Preferences { animations_enabled })
 }
 
-/// Config reloads invalidate preferences. Socket connection changes also need
-/// a refresh; those are reported separately by the event transport.
-#[must_use]
-pub fn preference_event(event: &str) -> bool {
-    event
-        .split_once(">>")
-        .is_some_and(|(name, _)| name == "configreloaded")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse, preference_event};
+    use super::parse;
 
     #[test]
     fn parses_boolean_and_legacy_integer_options_without_guessing() {
@@ -75,8 +66,11 @@ mod tests {
         for reply in ["{}", "[]", "broken", r#"{"option":"other","int":0}"#] {
             assert!(parse(reply).is_err());
         }
-        assert!(preference_event("configreloaded>>"));
-        assert!(!preference_event("configreloaded-extra>>"));
-        assert!(!preference_event("activewindow>>configreloaded"));
+        assert!(crate::CompositorEvent::parse("configreloaded>>").invalidates_preferences());
+        assert!(!crate::CompositorEvent::parse("configreloaded-extra>>").invalidates_preferences());
+        assert!(
+            !crate::CompositorEvent::parse("activewindow>>configreloaded")
+                .invalidates_preferences()
+        );
     }
 }

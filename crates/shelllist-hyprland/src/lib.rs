@@ -1,7 +1,9 @@
 mod address;
 mod error;
+mod events;
 pub use address::WindowAddress;
 pub use error::{IpcError, ack};
+pub use events::CompositorEvent;
 pub mod monitor;
 pub mod preferences;
 pub mod work_area;
@@ -107,7 +109,10 @@ impl Client {
 
     /// Watch this client's instance, including connection identity and event loss.
     pub async fn watch_events(self, sender: mpsc::Sender<Event>) {
-        watch_events_with(self, sender, |event| event).await;
+        tokio::select! {
+            _ = sender.closed() => {},
+            _ = reconnect_events(self, &sender) => {},
+        }
     }
 
     pub async fn work_areas(
@@ -161,6 +166,18 @@ impl Client {
             Err(error) => {
                 // Diagnostic connections send no request and never rebind this client.
                 if let Some(configured) = signature {
+                    // A broken event socket alone does not prove the instance
+                    // vanished while its command socket still accepts peers.
+                    let counterpart = if socket == EVENT_SOCKET {
+                        COMMAND_SOCKET
+                    } else {
+                        EVENT_SOCKET
+                    };
+                    let exact =
+                        exact_socket_candidates(&self.roots(), configured, counterpart).await;
+                    if connect_candidates(&exact).await.is_ok() {
+                        return Err(error);
+                    }
                     let others = socket_candidates(&self.roots(), None, socket)
                         .await
                         .into_iter()
@@ -293,79 +310,103 @@ async fn connect_candidates(candidates: &[PathBuf]) -> Result<(UnixStream, Strin
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    Connected,
-    /// An established connection ended: None for EOF, Some for a read/protocol error.
+    Connected { instance: String },
     Disconnected(Option<String>),
-    /// Connection failed, including at startup. Identical consecutive failures
-    /// are suppressed until the cause changes or a connection succeeds.
     ConnectFailed(String),
-    Message(String),
+    SessionGone { configured: String, live: String },
+    Lagged,
+    Compositor(CompositorEvent),
 }
 
-/// Compatibility stream for clients that reconcile on every compositor event.
-pub async fn watch_events(sender: mpsc::Sender<()>) {
-    watch_events_with(Client::default(), sender, |_| ()).await;
-}
-
-/// Includes connection transitions so consumers can reduce healthy polling,
-/// filter unrelated events, and refresh immediately when delivery recovers.
-pub async fn watch_events_detailed(sender: mpsc::Sender<Event>) {
-    watch_events_with(Client::default(), sender, |event| event).await;
-}
-
-async fn watch_events_with<T, F>(client: Client, sender: mpsc::Sender<T>, map: F)
-where
-    F: Fn(Event) -> T,
-{
-    // Receiver closure cancels connection attempts, reads, sends and backoff.
-    tokio::select! {
-        _ = sender.closed() => {},
-        _ = reconnect_events(client, &sender, &map) => {},
-    }
-}
-
-async fn reconnect_events<T>(
+async fn reconnect_events(
     client: Client,
-    sender: &mpsc::Sender<T>,
-    map: &impl Fn(Event) -> T,
-) -> Result<(), mpsc::error::SendError<T>> {
+    sender: &mpsc::Sender<Event>,
+) -> Result<(), mpsc::error::SendError<Event>> {
     let mut last_connect_error = None;
     loop {
-        match client.event_socket().await {
-            Ok(stream) => {
+        match client
+            .connect_before(EVENT_SOCKET, false, time::Instant::now() + IPC_TIMEOUT)
+            .await
+        {
+            Ok((stream, instance)) => {
                 last_connect_error = None;
-                forward_events(stream, sender, map).await?;
+                forward_events(stream, instance, sender).await?;
             }
             Err(error) => {
+                if let Some(IpcError::SessionGone { configured, live }) =
+                    error.downcast_ref::<IpcError>()
+                {
+                    sender
+                        .send(Event::SessionGone {
+                            configured: configured.clone(),
+                            live: live.clone(),
+                        })
+                        .await?;
+                    return Ok(());
+                }
                 let cause = format!("{error:#}");
                 if last_connect_error.as_ref() != Some(&cause) {
-                    sender
-                        .send(map(Event::ConnectFailed(cause.clone())))
-                        .await?;
+                    sender.send(Event::ConnectFailed(cause.clone())).await?;
                     last_connect_error = Some(cause);
                 }
             }
         }
-        // Back off even when a socket accepts and immediately closes.
         time::sleep(RECONNECT_DELAY).await;
     }
 }
 
-async fn forward_events<T>(
+async fn forward_events(
     stream: UnixStream,
-    sender: &mpsc::Sender<T>,
-    map: &impl Fn(Event) -> T,
-) -> Result<(), mpsc::error::SendError<T>> {
-    sender.send(map(Event::Connected)).await?;
+    instance: String,
+    sender: &mpsc::Sender<Event>,
+) -> Result<(), mpsc::error::SendError<Event>> {
+    sender.send(Event::Connected { instance }).await?;
     let mut reader = BufReader::new(stream);
+    let mut lagged = false;
     let cause = loop {
-        match read_event(&mut reader).await {
-            Ok(Some(line)) => sender.send(map(Event::Message(line))).await?,
+        // Keep the same read future alive while delivering pending loss. Dropping
+        // read_until midway could otherwise discard an unterminated frame.
+        let read = read_event(&mut reader);
+        tokio::pin!(read);
+        let result = if lagged {
+            tokio::select! {
+                result = &mut read => result,
+                permit = sender.reserve() => {
+                    permit.map_err(|_| mpsc::error::SendError(Event::Lagged))?.send(Event::Lagged);
+                    lagged = false;
+                    read.await
+                }
+            }
+        } else {
+            read.await
+        };
+        match result {
+            Ok(Some(line)) => {
+                if lagged {
+                    match sender.try_send(Event::Lagged) {
+                        Ok(()) => lagged = false,
+                        Err(mpsc::error::TrySendError::Full(_)) => continue,
+                        Err(mpsc::error::TrySendError::Closed(event)) => {
+                            return Err(mpsc::error::SendError(event));
+                        }
+                    }
+                }
+                match sender.try_send(Event::Compositor(CompositorEvent::parse(&line))) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => lagged = true,
+                    Err(mpsc::error::TrySendError::Closed(event)) => {
+                        return Err(mpsc::error::SendError(event));
+                    }
+                }
+            }
             Ok(None) => break None,
             Err(error) => break Some(format!("{error:#}")),
         }
     };
-    sender.send(map(Event::Disconnected(cause))).await
+    if lagged {
+        sender.send(Event::Lagged).await?;
+    }
+    sender.send(Event::Disconnected(cause)).await
 }
 
 // Bound an unterminated line too: read_line/lines would otherwise grow forever.
@@ -429,7 +470,7 @@ fn valid_signature(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMAND_SOCKET, Client, EVENT_SOCKET, Event, watch_events_with};
+    use super::{COMMAND_SOCKET, Client, EVENT_SOCKET, Event};
     use std::time::Duration;
     use tokio::{
         fs,
@@ -460,6 +501,118 @@ mod tests {
             stream.write_all(reply.as_ref()).await.unwrap();
         });
         (root, client, server)
+    }
+
+    #[tokio::test]
+    async fn pinned_requests_and_watchers_diagnose_without_rebinding() {
+        let (root, _, command) = socket_fixture(COMMAND_SOCKET).await;
+        let event =
+            tokio::net::UnixListener::bind(root.path().join("hypr/test").join(EVENT_SOCKET))
+                .unwrap();
+        let client = Client::new(root.path().into(), Some("missing".into()));
+        let error = client.request("j/clients").await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<super::IpcError>(),
+            Some(&super::IpcError::SessionGone {
+                configured: "missing".into(),
+                live: "test".into()
+            })
+        );
+        let (mut diagnostic, _) = command.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        diagnostic.read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.is_empty());
+        let (sender, mut events) = mpsc::channel(1);
+        let watcher = tokio::spawn(client.watch_events(sender));
+        assert_eq!(
+            events.recv().await,
+            Some(Event::SessionGone {
+                configured: "missing".into(),
+                live: "test".into()
+            })
+        );
+        watcher.await.unwrap();
+        assert_eq!(events.recv().await, None);
+        let (mut diagnostic, _) = event.accept().await.unwrap();
+        diagnostic.read_to_end(&mut Vec::new()).await.unwrap();
+
+        // Discovery is still supported explicitly, and Connected identifies it.
+        let client = Client::new(root.path().into(), None);
+        let (sender, mut events) = mpsc::channel(1);
+        let watcher = tokio::spawn(client.watch_events(sender));
+        let (_stream, _) = event.accept().await.unwrap();
+        assert_eq!(
+            events.recv().await,
+            Some(Event::Connected {
+                instance: "test".into()
+            })
+        );
+        drop(events);
+        watcher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn one_broken_socket_does_not_declare_a_live_session_gone() {
+        let (root, client, _command) = socket_fixture(COMMAND_SOCKET).await;
+        let other = root.path().join("hypr/other");
+        fs::create_dir_all(&other).await.unwrap();
+        let _other = tokio::net::UnixListener::bind(other.join(EVENT_SOCKET)).unwrap();
+        let error = client.event_socket().await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<super::IpcError>(),
+            Some(&super::IpcError::NotDelivered)
+        );
+    }
+
+    #[tokio::test]
+    async fn full_receivers_do_not_stall_socket_intake_and_loss_survives_idle() {
+        let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
+        let (sender, mut events) = mpsc::channel(1);
+        let watcher = tokio::spawn(client.watch_events(sender));
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // Connected occupies the only slot. This exceeds a Unix socket buffer;
+        // completing the write proves compositor reads continued under pressure.
+        let burst = b"workspacev2>>6,6\n".repeat(200_000);
+        time::timeout(Duration::from_secs(5), stream.write_all(&burst))
+            .await
+            .unwrap()
+            .unwrap();
+        stream.write_all(b"windowtit").await.unwrap();
+        // Let intake reach the unterminated frame before making room for Lagged.
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            events.recv().await,
+            Some(Event::Connected {
+                instance: "test".into()
+            })
+        );
+        assert_eq!(
+            time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap(),
+            Some(Event::Lagged)
+        );
+        stream
+            .write_all(b"lev2>>123,title,with,commas\n")
+            .await
+            .unwrap();
+        loop {
+            match time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .unwrap()
+            {
+                Some(Event::Lagged)
+                | Some(Event::Compositor(super::CompositorEvent::WorkspaceChanged)) => {}
+                Some(Event::Compositor(super::CompositorEvent::WindowTitleChanged)) => break,
+                event => panic!("frame was lost during pending loss delivery: {event:?}"),
+            }
+        }
+        drop(stream);
+        assert_eq!(events.recv().await, Some(Event::Disconnected(None)));
+        drop(events);
+        watcher.await.unwrap();
     }
 
     #[tokio::test]
@@ -499,6 +652,10 @@ mod tests {
                 client.event_socket().await.unwrap_err(),
             ] {
                 assert!(error.to_string().contains("HYPRLAND_INSTANCE_SIGNATURE"));
+                assert_eq!(
+                    error.downcast_ref::<super::IpcError>(),
+                    Some(&super::IpcError::NotDelivered)
+                );
             }
         }
         while let Ok(Ok((mut stream, _))) =
@@ -556,11 +713,13 @@ mod tests {
         let (mut stream, _) = listener.accept().await.unwrap();
         stream.read_to_end(&mut Vec::new()).await.unwrap();
         time::pause(); // The connected peer deliberately never replies.
-        let error = request.await.unwrap().unwrap_err();
-        assert!(error.to_string().contains("timed out"));
-        assert_eq!(
-            error.downcast_ref::<super::IpcError>(),
-            Some(&super::IpcError::OutcomeUnknown)
+        assert!(
+            request
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
         );
     }
 
@@ -575,9 +734,14 @@ mod tests {
         ] {
             let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
             let (sender, mut events) = mpsc::channel(8);
-            let watcher = tokio::spawn(watch_events_with(client, sender, |event| event));
+            let watcher = tokio::spawn(client.watch_events(sender));
             let (mut stream, _) = listener.accept().await.unwrap();
-            assert_eq!(events.recv().await, Some(Event::Connected));
+            assert_eq!(
+                events.recv().await,
+                Some(Event::Connected {
+                    instance: "test".into()
+                })
+            );
             stream.write_all(&bytes).await.unwrap();
             if let Some(expected) = failure {
                 let Some(Event::Disconnected(Some(cause))) =
@@ -622,20 +786,27 @@ mod tests {
     async fn event_stream_reports_reconnects_failures_and_cancels_backoff() {
         let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
         let (sender, mut events) = mpsc::channel(8);
-        let task = tokio::spawn(watch_events_with(client, sender, |event| event));
+        let task = tokio::spawn(client.watch_events(sender));
         let (mut stream, _) = listener.accept().await.unwrap();
-        assert_eq!(events.recv().await.unwrap(), Event::Connected);
+        assert_eq!(
+            events.recv().await.unwrap(),
+            Event::Connected {
+                instance: "test".into()
+            }
+        );
         stream
             .write_all(b"windowtitlev2>>123,bad \xff\nworkspace>>1\n")
             .await
             .unwrap();
         assert_eq!(
             events.recv().await.unwrap(),
-            Event::Message("windowtitlev2>>123,bad \u{fffd}".into())
+            Event::Compositor(super::CompositorEvent::parse(
+                "windowtitlev2>>123,bad \u{fffd}"
+            ))
         );
         assert_eq!(
             events.recv().await.unwrap(),
-            Event::Message("workspace>>1".into())
+            Event::Compositor(super::CompositorEvent::parse("workspace>>1"))
         );
         let boundary = "x".repeat(super::MAX_EVENT_BYTES as usize - 2);
         for line in ["openwindow>>123,1,app,title", "", &boundary] {
@@ -643,13 +814,16 @@ mod tests {
                 .write_all(format!("{line}\r\n").as_bytes())
                 .await
                 .unwrap();
-            assert_eq!(events.recv().await.unwrap(), Event::Message(line.into()));
+            assert_eq!(
+                events.recv().await.unwrap(),
+                Event::Compositor(super::CompositorEvent::parse(line))
+            );
         }
         stream.write_all(b"partial").await.unwrap();
         drop(stream);
         assert_eq!(
             events.recv().await.unwrap(),
-            Event::Message("partial".into())
+            Event::Compositor(super::CompositorEvent::parse("partial"))
         );
         assert_eq!(events.recv().await.unwrap(), Event::Disconnected(None));
         assert!(
@@ -661,7 +835,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(events.recv().await.unwrap(), Event::Connected);
+        assert_eq!(
+            events.recv().await.unwrap(),
+            Event::Connected {
+                instance: "test".into()
+            }
+        );
         drop(events);
         time::timeout(Duration::from_secs(1), task)
             .await
@@ -670,7 +849,7 @@ mod tests {
         time::pause();
         let client = Client::new("/unused".into(), Some("../invalid".into()));
         let (sender, mut events) = mpsc::channel(8);
-        let task = tokio::spawn(watch_events_with(client, sender, |event| event));
+        let task = tokio::spawn(client.watch_events(sender));
         let Some(Event::ConnectFailed(_)) = events.recv().await else {
             panic!("expected initial connection failure");
         };

@@ -237,16 +237,20 @@ pub async fn pinned_state(
         address, pid, workspace
     );
     let reply = client.request_exact(&format!("eval {expression}")).await?;
-    if reply.trim() == "ok" {
-        Ok(PinnedState::Present)
-    } else if reply.contains("shelllist-handoff-gone") {
-        Ok(PinnedState::Gone)
-    } else if reply.contains("shelllist-handoff-moved") {
-        Ok(PinnedState::Moved)
-    } else if reply.contains("shelllist-handoff-lost") {
-        Ok(PinnedState::Lost)
-    } else {
-        anyhow::bail!("cannot observe pinned window: {}", reply.trim())
+    match crate::ack(&reply) {
+        Ok(()) => Ok(PinnedState::Present),
+        Err(error) => match error.downcast_ref::<crate::IpcError>() {
+            Some(crate::IpcError::Rejected(reply)) if reply.contains("shelllist-handoff-gone") => {
+                Ok(PinnedState::Gone)
+            }
+            Some(crate::IpcError::Rejected(reply)) if reply.contains("shelllist-handoff-moved") => {
+                Ok(PinnedState::Moved)
+            }
+            Some(crate::IpcError::Rejected(reply)) if reply.contains("shelllist-handoff-lost") => {
+                Ok(PinnedState::Lost)
+            }
+            _ => Err(error.context("cannot observe pinned window")),
+        },
     }
 }
 
