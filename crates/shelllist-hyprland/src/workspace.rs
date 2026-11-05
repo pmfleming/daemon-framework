@@ -424,6 +424,11 @@ mod tests {
                 true,
                 include_str!("../tests/fixtures/0.57.1/special.json"),
             ),
+            (
+                "0.57.1",
+                false,
+                include_str!("../tests/fixtures/0.57.1/deployed.json"),
+            ),
         ] {
             let fixture: serde_json::Value = serde_json::from_str(text).unwrap();
             let batch = |keys: &[&str]| {

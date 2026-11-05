@@ -1,0 +1,375 @@
+{
+  "monitors": [
+    {
+      "id": 1,
+      "name": "HDMI-A-1",
+      "description": "redacted",
+      "make": "redacted",
+      "model": "redacted",
+      "serial": "redacted",
+      "width": 3440,
+      "height": 1440,
+      "physicalWidth": 800,
+      "physicalHeight": 350,
+      "refreshRate": 75.05,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "address": "5",
+        "id": 5,
+        "type": "normal",
+        "name": "5"
+      },
+      "specialWorkspace": {
+        "address": "",
+        "type": "",
+        "name": ""
+      },
+      "reserved": [
+        0,
+        51,
+        0,
+        0
+      ],
+      "scale": 1.25,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitary": "0",
+      "solitaryBlockedBy": [
+        "WINDOWED",
+        "CANDIDATE"
+      ],
+      "activelyTearing": false,
+      "tearingBlockedBy": [
+        "NOT_TORN",
+        "USER",
+        "CANDIDATE",
+        "HW_CURSOR"
+      ],
+      "directScanoutTo": "0",
+      "directScanoutBlockedBy": [
+        "USER",
+        "CANDIDATE"
+      ],
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "3440x1440@75.05Hz",
+        "3440x1440@59.97Hz",
+        "2560x1440@59.95Hz",
+        "1720x1440@75.00Hz",
+        "2048x1152@60.00Hz",
+        "1920x1200@59.95Hz",
+        "1920x1080@74.99Hz",
+        "1920x1080@60.00Hz",
+        "1920x1080@60.00Hz",
+        "1920x1080@59.94Hz",
+        "1920x1080@50.00Hz",
+        "1600x1200@60.00Hz",
+        "1600x900@60.00Hz",
+        "1280x1024@75.03Hz",
+        "1280x1024@60.02Hz",
+        "1280x800@59.91Hz",
+        "1152x864@75.00Hz",
+        "1280x720@60.00Hz",
+        "1280x720@59.94Hz",
+        "1280x720@50.00Hz",
+        "1024x768@75.03Hz",
+        "1024x768@70.07Hz",
+        "1024x768@60.00Hz",
+        "832x624@74.55Hz",
+        "800x600@75.00Hz",
+        "800x600@72.19Hz",
+        "800x600@60.32Hz",
+        "800x600@56.25Hz",
+        "720x576@50.00Hz",
+        "720x576@50.00Hz",
+        "720x480@60.00Hz",
+        "720x480@60.00Hz",
+        "720x480@59.94Hz",
+        "720x480@59.94Hz",
+        "640x480@75.00Hz",
+        "640x480@72.81Hz",
+        "640x480@66.67Hz",
+        "640x480@60.00Hz",
+        "640x480@59.94Hz",
+        "640x480@59.94Hz",
+        "720x400@70.08Hz"
+      ],
+      "colorManagementPreset": "srgb",
+      "sdrBrightness": 1,
+      "sdrSaturation": 1,
+      "sdrMinLuminance": 0.2,
+      "sdrMaxLuminance": 80,
+      "hardwareCursorsInUse": true,
+      "hardwareDetails": {
+        "backend": "drm",
+        "hdr": true,
+        "chroma": true,
+        "bt2020": true,
+        "vrrCapable": true
+      }
+    }
+  ],
+  "workspaces": [
+    {
+      "address": "5",
+      "id": 5,
+      "type": "normal",
+      "name": "5",
+      "monitor": "HDMI-A-1",
+      "monitorID": 1,
+      "windows": 1,
+      "hasfullscreen": false,
+      "lastwindow": "0x100",
+      "lastwindowtitle": "redacted",
+      "ispersistent": false,
+      "tiledLayout": "dwindle"
+    },
+    {
+      "address": "3",
+      "id": 3,
+      "type": "normal",
+      "name": "3",
+      "monitor": "HDMI-A-1",
+      "monitorID": 1,
+      "windows": 1,
+      "hasfullscreen": false,
+      "lastwindow": "0x101",
+      "lastwindowtitle": "redacted",
+      "ispersistent": false,
+      "tiledLayout": "dwindle"
+    },
+    {
+      "address": "1",
+      "id": 1,
+      "type": "normal",
+      "name": "1",
+      "monitor": "HDMI-A-1",
+      "monitorID": 1,
+      "windows": 1,
+      "hasfullscreen": false,
+      "lastwindow": "0x102",
+      "lastwindowtitle": "redacted",
+      "ispersistent": false,
+      "tiledLayout": "dwindle"
+    }
+  ],
+  "clients": [
+    {
+      "address": "0x102",
+      "mapped": true,
+      "hidden": false,
+      "visible": true,
+      "acceptsInput": true,
+      "at": [
+        3,
+        54
+      ],
+      "size": [
+        2746,
+        1095
+      ],
+      "workspace": {
+        "address": "1",
+        "id": 1,
+        "type": "normal",
+        "name": "1"
+      },
+      "floating": false,
+      "monitor": 1,
+      "class": "redacted",
+      "title": "redacted",
+      "initialClass": "redacted",
+      "initialTitle": "redacted",
+      "pid": 1000,
+      "xwayland": false,
+      "pinned": false,
+      "pinFullscreened": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "default",
+      "allowedOverFullscreen": true,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 2,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": "",
+      "contentType": "none",
+      "tearingHint": false,
+      "stableId": "redacted"
+    },
+    {
+      "address": "0x101",
+      "mapped": true,
+      "hidden": false,
+      "visible": true,
+      "acceptsInput": true,
+      "at": [
+        3,
+        54
+      ],
+      "size": [
+        2746,
+        1095
+      ],
+      "workspace": {
+        "address": "3",
+        "id": 3,
+        "type": "normal",
+        "name": "3"
+      },
+      "floating": false,
+      "monitor": 1,
+      "class": "redacted",
+      "title": "redacted",
+      "initialClass": "redacted",
+      "initialTitle": "redacted",
+      "pid": 1001,
+      "xwayland": false,
+      "pinned": false,
+      "pinFullscreened": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "default",
+      "allowedOverFullscreen": true,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 1,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": "",
+      "contentType": "none",
+      "tearingHint": false,
+      "stableId": "redacted"
+    },
+    {
+      "address": "0x100",
+      "mapped": true,
+      "hidden": false,
+      "visible": true,
+      "acceptsInput": true,
+      "at": [
+        3,
+        54
+      ],
+      "size": [
+        2746,
+        1095
+      ],
+      "workspace": {
+        "address": "5",
+        "id": 5,
+        "type": "normal",
+        "name": "5"
+      },
+      "floating": false,
+      "monitor": 1,
+      "class": "redacted",
+      "title": "redacted",
+      "initialClass": "redacted",
+      "initialTitle": "redacted",
+      "pid": 1002,
+      "xwayland": false,
+      "pinned": false,
+      "pinFullscreened": false,
+      "fullscreen": 0,
+      "fullscreenClient": 0,
+      "fullscreenHandler": "default",
+      "allowedOverFullscreen": true,
+      "grouped": [],
+      "tags": [],
+      "swallowing": "0x0",
+      "focusHistoryID": 0,
+      "inhibitingIdle": false,
+      "xdgTag": "",
+      "xdgDescription": "",
+      "contentType": "none",
+      "tearingHint": false,
+      "stableId": "redacted"
+    }
+  ],
+  "activewindow": {
+    "address": "0x100",
+    "mapped": true,
+    "hidden": false,
+    "visible": true,
+    "acceptsInput": true,
+    "at": [
+      3,
+      54
+    ],
+    "size": [
+      2746,
+      1095
+    ],
+    "workspace": {
+      "address": "5",
+      "id": 5,
+      "type": "normal",
+      "name": "5"
+    },
+    "floating": false,
+    "monitor": 1,
+    "class": "redacted",
+    "title": "redacted",
+    "initialClass": "redacted",
+    "initialTitle": "redacted",
+    "pid": 1002,
+    "xwayland": false,
+    "pinned": false,
+    "pinFullscreened": false,
+    "fullscreen": 0,
+    "fullscreenClient": 0,
+    "fullscreenHandler": "default",
+    "allowedOverFullscreen": true,
+    "grouped": [],
+    "tags": [],
+    "swallowing": "0x0",
+    "focusHistoryID": 0,
+    "inhibitingIdle": false,
+    "xdgTag": "",
+    "xdgDescription": "",
+    "contentType": "none",
+    "tearingHint": false,
+    "stableId": "redacted"
+  },
+  "workspacerules": [
+    {
+      "workspaceString": "1",
+      "enabled": true,
+      "default": true
+    },
+    {
+      "workspaceString": "2",
+      "enabled": true,
+      "default": false
+    },
+    {
+      "workspaceString": "3",
+      "enabled": true,
+      "default": false
+    },
+    {
+      "workspaceString": "4",
+      "enabled": true,
+      "default": false
+    },
+    {
+      "workspaceString": "5",
+      "enabled": true,
+      "default": false
+    }
+  ],
+  "gaps": {
+    "option": "general:gaps_out",
+    "css": "2 2 2 2",
+    "set": true
+  }
+}

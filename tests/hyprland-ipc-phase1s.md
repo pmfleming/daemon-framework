@@ -1,5 +1,48 @@
 # Phase 1S upgrade preparation
 
+## Deployment follow-up — 2026-11-05
+
+The preparation record below is historical. The user approved merging the local
+branches, ran `rebuild`, and rebooted. The first deployment failed because the
+new Mesa binary required a newer glibc than the base desktop applications.
+NixOS repair `ffa4d53` builds both Mesa architectures from the display pin's
+recipe against base OS libraries and adds actual loader regression checks.
+Its `config/scripts/tests/graphics-driver-load.md` records the failure and repair
+evidence. Full coordinated checks and a complete non-activating system build
+passed before the second deployment.
+
+The user reports **rebuild and reboot successful**. Read-only verification of
+the running session confirms:
+
+- `/run/current-system` is the repaired `8sjx3024llw86dark52hbjsbk28b17wj`
+  generation, matching the successful rebuild/deployment record.
+- Hyprland **0.57.1**, `configProvider=lua`, DRM backend, Linux **6.18.60**,
+  Aquamarine **0.16.0**, and the repaired Mesa **26.2.6** driver are active.
+- Shelllist, app-daemon and bar-daemon user services are active. No occurrences
+  of the earlier missing-GLIBC, Mesa-loader or graphics-context failures were
+  found in this boot's journal at verification time.
+- `update-worker status` reports a valid baseline and
+  **staged=false, queued=false, ready=false**. Both delayed update timers are
+  active again after reboot, satisfying the plan's temporary-hold release.
+- `crates/shelllist-hyprland/tests/fixtures/0.57.1/deployed.json` captures the
+  real session's monitors, workspaces, clients, active window, workspace rules
+  and gaps. Titles, application classes, monitor metadata, process identities
+  and window addresses are anonymized. The snapshot/work-area fixture test now
+  parses this capture as well as the private-compositor captures. No special
+  workspace was open, and no live compositor mutation was used for capture.
+
+The user explicitly confirms boot/desktop testing and says hardware recovery
+is still untested. Docking/undocking, suspend and hibernation on this
+generation therefore still require results under the plan's Phase 1S
+"Confirming it worked" checklist. Special-workspace UI interaction and portal
+launcher placement also retain their earlier private-session evidence rather
+than a new user-confirmed real-session journey. Phase 2 implementation has not
+started; the required physical recovery validation remains pending. The
+Hyprland crate suite passed with the deployed fixture (15 tests, one separate
+opt-in renderer test ignored), and framework `cargo fmt --check` passed.
+
+## Original preparation record
+
 Completed 2026-11-05 on local `hyprland-ipc-gaps` branches. The implementation
 stops at the plan's D8 approval gate. No branches were pushed or merged, and no
 system rebuild, activation, production service restart or reboot was performed.

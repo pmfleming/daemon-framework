@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Record the successfully deployed Hyprland 0.57.1 upgrade after the Mesa/libc
+  repair, and validate snapshot/work-area decoding against a redacted capture
+  of the actual upgraded desktop. Physical recovery validation remains pending.
+
 - Validate the coordinated Phase 1S upgrade preparation against Hyprland 0.57.1
   and Quickshell 0.3.2 on the approved Qt. Record local commits, checks, display
   stack versions and deployment blockers; activation waits for user approval.
