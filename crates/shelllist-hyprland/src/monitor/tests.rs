@@ -15,13 +15,13 @@ fn rules_encode_enablement_geometry_and_explicit_mirroring() {
     for name in ["eDP-1", "Virtual_2"] {
         assert_eq!(
             command(name, Rule::Disable).unwrap(),
-            format!("eval hl.monitor({{ output = \"{name}\", disabled = true }})")
+            format!("hl.monitor({{ output = \"{name}\", disabled = true }})")
         );
         for mode in ["1920x1200@60.00Hz", "1920x1200@60.00"] {
             assert_eq!(
                 command(name, configured(Mode::Exact(mode), 1.25, Some(0), "")).unwrap(),
                 format!(
-                    "eval hl.monitor({{ output = \"{name}\", disabled = false, mode = \"1920x1200@60.00\", position = \"-1920x120\", scale = 1.25, transform = 0, mirror = \"\" }})"
+                    "hl.monitor({{ output = \"{name}\", disabled = false, mode = \"1920x1200@60.00\", position = \"-1920x120\", scale = 1.25, transform = 0, mirror = \"\" }})"
                 )
             );
         }
@@ -39,7 +39,7 @@ fn rules_encode_enablement_geometry_and_explicit_mirroring() {
     .unwrap();
     assert_eq!(
         command,
-        "eval hl.monitor({ output = \"eDP-1\", disabled = false, mode = \"preferred\", position = \"auto\", scale = 1.25, mirror = \"DP-1\" })"
+        "hl.monitor({ output = \"eDP-1\", disabled = false, mode = \"preferred\", position = \"auto\", scale = 1.25, mirror = \"DP-1\" })"
     );
 }
 

@@ -1,5 +1,6 @@
 //! Typed encoding for Hyprland's Lua monitor rules, without executing effects.
 //! Callers own eligibility, topology/mode validation, persistence and readback.
+use crate::Lua;
 use anyhow::{Context, Result, ensure};
 
 /// A compositor-selected mode or an explicit `WIDTHxHEIGHT@RATE[Hz]` token.
@@ -38,7 +39,7 @@ pub enum Rule<'a> {
 /// compositor's transform enum. Domain limits, advertised modes, last-screen
 /// protection and confirmation against observed state remain caller obligations.
 /// This function performs no IPC, retries, persistence or implicit readback.
-pub fn command(output: &str, rule: Rule<'_>) -> Result<String> {
+pub fn command(output: &str, rule: Rule<'_>) -> Result<Lua> {
     ensure!(identifier(output), "Invalid Hyprland output identifier");
     let Rule::Enable {
         mode,
@@ -48,9 +49,9 @@ pub fn command(output: &str, rule: Rule<'_>) -> Result<String> {
         mirror,
     } = rule
     else {
-        return Ok(format!(
-            "eval hl.monitor({{ output = \"{output}\", disabled = true }})"
-        ));
+        return Ok(Lua(format!(
+            "hl.monitor({{ output = \"{output}\", disabled = true }})"
+        )));
     };
     let mode = mode.token()?;
     ensure!(
@@ -72,9 +73,9 @@ pub fn command(output: &str, rule: Rule<'_>) -> Result<String> {
     let transform = transform.map_or_else(String::new, |value| format!(", transform = {value}"));
     // hl.monitor merges with the previous rule. Supplying geometry alone does
     // not undo disabled=true, and omitting mirror would retain an old source.
-    Ok(format!(
-        "eval hl.monitor({{ output = \"{output}\", disabled = false, mode = \"{mode}\", position = \"{position}\", scale = {scale}{transform}, mirror = \"{mirror}\" }})"
-    ))
+    Ok(Lua(format!(
+        "hl.monitor({{ output = \"{output}\", disabled = false, mode = \"{mode}\", position = \"{position}\", scale = {scale}{transform}, mirror = \"{mirror}\" }})"
+    )))
 }
 
 pub(crate) fn identifier(value: &str) -> bool {

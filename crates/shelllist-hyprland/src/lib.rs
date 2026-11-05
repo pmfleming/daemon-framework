@@ -1,3 +1,6 @@
+pub mod capabilities;
+pub mod lua;
+pub use lua::{Lua, execute};
 mod address;
 mod error;
 mod events;
@@ -39,6 +42,7 @@ const MAX_REPLY_BYTES: u64 = 16 * 1024 * 1024;
 pub struct Client {
     runtime_dir: PathBuf,
     signature: Option<OsString>,
+    capabilities: std::sync::Arc<tokio::sync::OnceCell<capabilities::Capabilities>>,
 }
 
 impl Default for Client {
@@ -56,6 +60,7 @@ impl Client {
         Self {
             runtime_dir,
             signature: env::var_os("HYPRLAND_INSTANCE_SIGNATURE"),
+            capabilities: Default::default(),
         }
     }
 
@@ -66,6 +71,7 @@ impl Client {
         Self {
             runtime_dir,
             signature: signature.map(OsString::from),
+            capabilities: Default::default(),
         }
     }
 
@@ -84,6 +90,30 @@ impl Client {
                 Ok(value)
             })
             .transpose()
+    }
+
+    pub async fn capabilities(&self) -> Result<&capabilities::Capabilities> {
+        self.capabilities
+            .get_or_try_init(|| capabilities::load(self))
+            .await
+    }
+
+    /// Read validated option names in one compositor turn. This is read-only
+    /// and does not depend on Lua mutation capabilities.
+    pub async fn options(&self, names: &[&str]) -> Result<String> {
+        anyhow::ensure!(
+            !names.is_empty() && names.iter().all(|name| lua::valid_option(name)),
+            "invalid compositor options"
+        );
+        self.request(&format!(
+            "[[BATCH]]{}",
+            names
+                .iter()
+                .map(|name| format!("j/getoption {name}"))
+                .collect::<Vec<_>>()
+                .join(";")
+        ))
+        .await
     }
 
     /// A configured signature pins reads and commands to that instance.
@@ -494,11 +524,24 @@ mod tests {
     ) -> (tempfile::TempDir, Client, tokio::task::JoinHandle<()>) {
         let (root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut command = String::new();
-            stream.read_to_string(&mut command).await.unwrap();
-            assert_eq!(command, expected);
-            stream.write_all(reply.as_ref()).await.unwrap();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut command = String::new();
+                stream.read_to_string(&mut command).await.unwrap();
+                let preflight = match command.as_str() {
+                    "j/status" => Some(r#"{"configProvider":"lua"}"#),
+                    "j/version" => Some(r#"{"version":"0.57.1"}"#),
+                    _ if command.starts_with("eval assert(type(") => Some("ok"),
+                    _ => None,
+                };
+                if let Some(reply) = preflight {
+                    stream.write_all(reply.as_bytes()).await.unwrap();
+                    continue;
+                }
+                assert_eq!(command, expected);
+                stream.write_all(reply.as_ref()).await.unwrap();
+                break;
+            }
         });
         (root, client, server)
     }
@@ -645,6 +688,7 @@ mod tests {
             let client = Client {
                 runtime_dir: root.path().into(),
                 signature: Some(signature),
+                capabilities: Default::default(),
             };
             for error in [
                 client.request("j/clients").await.unwrap_err(),

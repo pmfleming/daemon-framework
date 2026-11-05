@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Use typed Lua builders and one checked execution path for all Rust compositor
+  mutations. Require Lua configuration, Hyprland 0.57.1 and the builder API set;
+  cache only successful checks for the exact client session. Remove legacy
+  command retries from consumers and Lua/legacy branches from Shelllist.
+
 - Replace raw Hyprland event strings with typed, exact-name notifications and
   explicit loss delivery. Custom clients keep their session identity; diagnostic
   discovery never rebinds reads or commands. App/bar daemons drain normal

@@ -87,6 +87,19 @@ Shelllist retains environment overrides and animation presentation policy.
 
 ### Monitor commands
 
+All Rust command builders return `Lua`, containing source without an `eval`
+prefix. Send it with `execute(&client, &lua)` (also re-exported from `workspace`).
+`Lua::then` composes validated commands atomically; it accepts no raw string.
+Before effects, `Client::capabilities` requires Lua configuration, Hyprland
+0.57.1 or newer and every API in `capabilities::LUA_APIS`. Failures are retried on
+the next call; only successful checks are shared by clones of that exact client.
+The probe only checks function types. Reads do not require mutation capabilities.
+
+`lua` also builds unguarded address-based focus/close/move, ordinary-workspace
+focus and numeric/boolean `hl.config` patches. These retain the consumers'
+existing effect semantics; workspace guards remain in `workspace`. Read-only
+option batches use `Client::options`, with batch delimiters rejected in keys.
+
 `monitor::command(output, Rule)` encodes a validated Lua monitor request without
 sending it. `Rule::Disable` explicitly sets `disabled = true`; `Rule::Enable`
 always sets `disabled = false`, because `hl.monitor` merges into the existing
@@ -100,7 +113,7 @@ a nonempty value names the source output. Exact output/mirror identifiers accept
 only ASCII letters, digits, hyphens and underscores, never selectors or executable
 Lua. Exact modes retain their precision and lose only the optional `Hz` suffix.
 
-Pass the result to `Client::request_exact`; there is no new transport,
+Pass the result to `execute`; there is no new transport,
 implicit retry, state cache or persistence. An `ok` reply acknowledges the command,
 not an observed hardware transition. The framework owns encoding, syntax checks
 and merge-semantics regression tests, including a private command-socket test.

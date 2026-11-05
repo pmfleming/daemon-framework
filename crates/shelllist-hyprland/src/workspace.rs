@@ -1,6 +1,7 @@
 //! Exact-session compositor primitives. Rust validates and encodes all input;
 //! the small Lua IPC guard executes atomically on the compositor event loop.
-use crate::Client;
+pub use crate::execute;
+use crate::{Client, Lua};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
@@ -118,6 +119,7 @@ pub async fn pinned_snapshot(
     let expression = format!(
         "local m=hl.get_monitor({monitor}) assert(m and m.active_workspace and m.active_workspace.id=={workspace},'stale monitor') local targets=hl.get_windows({{workspace={workspace}}}) assert(#targets<=512,'too many windows') __shelllist_window_refs=__shelllist_window_refs or {{}} for _,w in ipairs(targets) do local key={prefix}..'-'..w.address assert(__shelllist_window_refs[key]==nil,'duplicate token') __shelllist_window_refs[key]=w end"
     );
+    client.capabilities().await?;
     let reply = client
         .request_exact(&format!(
             "[[BATCH]]eval {expression};j/monitors;j/workspaces;j/clients"
@@ -152,23 +154,18 @@ pub fn quote(value: &str) -> Result<String> {
     Ok(serde_json::to_string(value)?)
 }
 
-pub async fn execute(client: &Client, expression: &str) -> Result<()> {
-    let reply = client.request_exact(&format!("eval {expression}")).await?;
-    crate::ack(&reply)
-}
-
-pub fn guarded_close(address: &str, pid: u32, workspace: i64) -> Result<String> {
+pub fn guarded_close(address: &str, pid: u32, workspace: i64) -> Result<Lua> {
     let guard = window_guard(address, pid, workspace)?;
-    Ok(format!(
+    Ok(Lua(format!(
         "{guard} local r=hl.dispatch(hl.dsp.window.close({{window=w}})); assert(r.ok,r.error)"
-    ))
+    )))
 }
 
-pub fn focus_window(address: &str, pid: u32, workspace: i64) -> Result<String> {
+pub fn focus_window(address: &str, pid: u32, workspace: i64) -> Result<Lua> {
     let guard = window_guard(address, pid, workspace)?;
-    Ok(format!(
+    Ok(Lua(format!(
         "{guard} local r=hl.dispatch(hl.dsp.focus({{window=w}})); assert(r.ok,r.error)"
-    ))
+    )))
 }
 
 /// Follow a launch only while the invoking monitor and workspace still own focus.
@@ -178,39 +175,39 @@ pub fn follow_window(
     workspace: i64,
     monitor: &str,
     origin: i64,
-) -> Result<String> {
+) -> Result<Lua> {
     ensure!(origin > 0, "invalid origin");
     let monitor = quote(monitor)?;
     let focus = focus_window(address, pid, workspace)?;
-    Ok(format!(
+    Ok(Lua(format!(
         "local m=hl.get_active_monitor(); assert(m and m.name=={monitor} and m.active_workspace and m.active_workspace.id=={origin},'focus intent expired'); {focus}"
-    ))
+    )))
 }
 
 /// Pin a weak compositor window reference; unlike an address it cannot identify
 /// a subsequently allocated window from the same process. The caller owns token
 /// quotas, lifetime and journal admission. This table contains no routing policy.
-pub fn pin_window(token: &str, address: &str, pid: u32, workspace: i64) -> Result<String> {
+pub fn pin_window(token: &str, address: &str, pid: u32, workspace: i64) -> Result<Lua> {
     let token = token_literal(token)?;
     let guard = window_guard(address, pid, workspace)?;
-    Ok(format!(
+    Ok(Lua(format!(
         "{guard} __shelllist_window_refs=__shelllist_window_refs or {{}}; assert(__shelllist_window_refs[{token}]==nil,'duplicate token'); __shelllist_window_refs[{token}]=w"
-    ))
+    )))
 }
 
-pub fn close_pinned(token: &str, address: &str, pid: u32, workspace: i64) -> Result<String> {
+pub fn close_pinned(token: &str, address: &str, pid: u32, workspace: i64) -> Result<Lua> {
     let token = token_literal(token)?;
     let guard = window_guard(address, pid, workspace)?;
-    Ok(format!(
+    Ok(Lua(format!(
         "{guard} assert(__shelllist_window_refs and __shelllist_window_refs[{token}]==w,'expired window'); __shelllist_window_refs[{token}]=nil; local r=hl.dispatch(hl.dsp.window.close({{window=w}})); assert(r.ok,r.error)"
-    ))
+    )))
 }
 
-pub fn release_window(token: &str) -> Result<String> {
+pub fn release_window(token: &str) -> Result<Lua> {
     let token = token_literal(token)?;
-    Ok(format!(
+    Ok(Lua(format!(
         "if __shelllist_window_refs then __shelllist_window_refs[{token}]=nil end"
-    ))
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +233,7 @@ pub async fn pinned_state(
         "assert(__shelllist_window_refs and __shelllist_window_refs[{token}]~=nil,'shelllist-handoff-lost'); local w=hl.get_window('address:{}'); assert(w and w.mapped and __shelllist_window_refs[{token}]==w,'shelllist-handoff-gone'); assert(w.pid=={} and w.workspace and w.workspace.id=={},'shelllist-handoff-moved')",
         address, pid, workspace
     );
+    client.capabilities().await?;
     let reply = client.request_exact(&format!("eval {expression}")).await?;
     match crate::ack(&reply) {
         Ok(()) => Ok(PinnedState::Present),
@@ -262,7 +260,7 @@ pub fn replace_pinned(
     candidate: &Window,
     destination: i64,
     monitor: &str,
-) -> Result<String> {
+) -> Result<Lua> {
     let token = token_literal(token)?;
     window_guard(previous_address, candidate.pid, destination)?;
     let movement = move_local(
@@ -275,9 +273,9 @@ pub fn replace_pinned(
         destination,
         monitor,
     )?;
-    Ok(format!(
+    Ok(Lua(format!(
         "local old=hl.get_window('address:{previous_address}'); assert(__shelllist_window_refs and __shelllist_window_refs[{token}]~=nil and (not old or not old.mapped or __shelllist_window_refs[{token}]~=old),'predecessor still mapped or identity lost'); {movement}; __shelllist_window_refs[{token}]=w"
-    ))
+    )))
 }
 
 fn token_literal(token: &str) -> Result<String> {
@@ -301,7 +299,7 @@ pub fn select_local(
     destination: i64,
     move_window: bool,
     materialize: bool,
-) -> Result<String> {
+) -> Result<Lua> {
     ensure!(
         expected > 0 && destination > 0 && destination <= i32::MAX as i64,
         "invalid workspace"
@@ -321,15 +319,15 @@ pub fn select_local(
             "local r=hl.dispatch(hl.dsp.focus({{workspace={destination}}})); assert(r.ok,r.error)"
         )
     };
-    Ok(format!(
+    Ok(Lua(format!(
         "local m=hl.get_active_monitor(); assert(m and m.name=={monitor} and m.active_workspace and m.active_workspace.id=={expected},'focus context changed'); local target=hl.get_workspace({destination}); {existence} assert(not target or target.monitor==m,'foreign destination'); {action}"
-    ))
+    )))
 }
 
 /// Focus/create on an explicit monitor without moving another monitor's workspace.
 /// expected guards the captured local focus; background replacement restores the
 /// previously focused monitor/window within the same compositor event turn.
-pub fn focus_local(monitor: &str, expected: i64, destination: i64, follow: bool) -> Result<String> {
+pub fn focus_local(monitor: &str, expected: i64, destination: i64, follow: bool) -> Result<Lua> {
     ensure!(
         expected > 0 && destination > 0 && destination <= i32::MAX as i64,
         "invalid workspace"
@@ -340,20 +338,20 @@ pub fn focus_local(monitor: &str, expected: i64, destination: i64, follow: bool)
     } else {
         "if previous then local r=hl.dispatch(hl.dsp.focus({monitor=previous})); assert(r.ok,r.error) end; if active and active.mapped then local r=hl.dispatch(hl.dsp.focus({window=active})); assert(r.ok,r.error) end"
     };
-    Ok(format!(
+    Ok(Lua(format!(
         "local m=hl.get_monitor({monitor}); assert(m and m.active_workspace and m.active_workspace.id=={expected},'stale monitor'); local target=hl.get_workspace({destination}); assert(not target or target.monitor==m,'workspace belongs to another monitor'); local previous=hl.get_active_monitor(); local active=hl.get_active_window(); local r=hl.dispatch(hl.dsp.focus({{monitor=m}})); assert(r.ok,r.error); r=hl.dispatch(hl.dsp.focus({{workspace={destination}}})); assert(r.ok,r.error); {restore}"
-    ))
+    )))
 }
 
-pub fn guarded_move(address: &str, pid: u32, source: i64, destination: i64) -> Result<String> {
+pub fn guarded_move(address: &str, pid: u32, source: i64, destination: i64) -> Result<Lua> {
     ensure!(
         destination > 0 && destination <= i32::MAX as i64,
         "invalid destination"
     );
     let guard = window_guard(address, pid, source)?;
-    Ok(format!(
+    Ok(Lua(format!(
         "{guard} local r=hl.dispatch(hl.dsp.window.move({{window=w,workspace={destination},follow=false}})); assert(r.ok,r.error)"
-    ))
+    )))
 }
 
 /// Materialize and populate a reserved destination in one compositor turn, before
@@ -364,12 +362,12 @@ pub fn move_local(
     source: i64,
     destination: i64,
     monitor: &str,
-) -> Result<String> {
+) -> Result<Lua> {
     let movement = guarded_move(address, pid, source, destination)?;
     let monitor = quote(monitor)?;
-    Ok(format!(
+    Ok(Lua(format!(
         "local m=hl.get_monitor({monitor}); assert(m,'monitor disappeared'); local target=hl.get_workspace({destination}); assert(not target or target.monitor==m,'foreign destination'); local previous=hl.get_active_monitor(); local active=hl.get_active_window(); local r=hl.dispatch(hl.dsp.focus({{monitor=m}})); assert(r.ok,r.error); {movement}; if previous then r=hl.dispatch(hl.dsp.focus({{monitor=previous}})); assert(r.ok,r.error) end; if active and active~=w and active.mapped then r=hl.dispatch(hl.dsp.focus({{window=active}})); assert(r.ok,r.error) end"
-    ))
+    )))
 }
 
 fn window_guard(address: &str, pid: u32, workspace: i64) -> Result<String> {

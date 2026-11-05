@@ -319,7 +319,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     // Real special workspaces must remain readable on 0.57, where id is absent.
     workspace::execute(
         &client,
-        "local r=hl.dispatch(hl.dsp.workspace.toggle_special('ipc-probe')); assert(r.ok,r.error)",
+        &shelllist_hyprland::lua::toggle_special("ipc-probe").unwrap(),
     )
     .await
     .unwrap();
