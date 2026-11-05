@@ -14,7 +14,20 @@ pub struct Insets {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct WorkspaceRef {
-    id: i64,
+    id: Option<i64>,
+    name: String,
+}
+impl WorkspaceRef {
+    fn present(&self) -> bool {
+        self.id.is_some_and(|id| id != 0) || !self.name.is_empty()
+    }
+
+    fn matches(&self, workspace: &Workspace) -> bool {
+        match (self.id, workspace.id) {
+            (Some(id), Some(other)) if id != 0 => id == other,
+            _ => !self.name.is_empty() && self.name == workspace.name,
+        }
+    }
 }
 #[derive(Debug, Deserialize)]
 struct Monitor {
@@ -48,12 +61,17 @@ struct Monitor {
 }
 #[derive(Debug, Deserialize)]
 struct Workspace {
-    id: i64,
+    id: Option<i64>,
     name: String,
     #[serde(default)]
     windows: usize,
     #[serde(default)]
     hasfullscreen: bool,
+}
+impl Workspace {
+    fn special(&self) -> bool {
+        self.name.starts_with("special:") || self.id.is_some_and(|id| (-1336..-1).contains(&id))
+    }
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -210,7 +228,7 @@ impl Window {
     fn on(&self, workspace: &Workspace) -> bool {
         self.workspace
             .as_ref()
-            .is_some_and(|w| w.id == workspace.id)
+            .is_some_and(|w| w.matches(workspace))
     }
 
     fn matches_flags(&self, flags: &str) -> bool {
@@ -287,15 +305,17 @@ fn term(
     let integer = selector_integer(value);
     match kind {
         "r" => {
-            value.contains('-') && range(value).is_some_and(|range| range.contains(&workspace.id))
+            value.contains('-')
+                && workspace
+                    .id
+                    .is_some_and(|id| range(value).is_some_and(|range| range.contains(&id)))
         }
-        "s" => {
-            integer.is_none_or(|value| (workspace.id < -1 && workspace.id > -1337) == (value != 0))
-        }
+        "s" => integer.is_none_or(|value| workspace.special() == (value != 0)),
         "n" => match value.split_once(':') {
             Some(("s", prefix)) => workspace.name.starts_with(prefix),
             Some(("e", suffix)) => workspace.name.ends_with(suffix),
-            _ => integer.is_none_or(|value| i64::from(workspace.id <= -1337) == value),
+            _ => integer
+                .is_none_or(|value| i64::from(workspace.id.is_some_and(|id| id <= -1337)) == value),
         },
         "m" => monitor_matches(value, monitor, &snapshot.monitors),
         "w" => {
@@ -334,7 +354,7 @@ fn matches(selector: &str, workspace: &Workspace, monitor: &Monitor, snapshot: &
         return true;
     }
     if let Ok(id) = rest.parse::<i64>() {
-        return workspace.id == id;
+        return workspace.id == Some(id);
     }
     if let Some(name) = rest.strip_prefix("name:") {
         return workspace.name == name;
@@ -362,12 +382,12 @@ fn insets(snapshot: &Snapshot) -> BTreeMap<String, Insets> {
             if reserved.iter().any(|v| !v.is_finite()) {
                 return None;
             }
-            let active = if monitor.special.id != 0 {
-                monitor.special.id
+            let active = if monitor.special.present() {
+                &monitor.special
             } else {
-                monitor.active.id
+                &monitor.active
             };
-            let workspace = snapshot.workspaces.iter().find(|w| w.id == active)?;
+            let workspace = snapshot.workspaces.iter().find(|w| active.matches(w))?;
             let gaps = snapshot
                 .rules
                 .iter()

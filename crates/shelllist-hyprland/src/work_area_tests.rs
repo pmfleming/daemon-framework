@@ -95,3 +95,34 @@ fn logical_reservations_css_gaps_and_ordered_rules() {
     assert!(geometry_event("togglegroup>>1"));
     assert!(!geometry_event("activewindow>>title"));
 }
+
+#[test]
+fn numberless_special_workspace_rules_and_clients_match_by_name() {
+    let mut parts = fixture();
+    parts[0][0]["specialWorkspace"] = json!({"name":"special:probe"});
+    parts[1] = json!([
+        {"id":1,"name":"1","windows":2},
+        {"id":3,"name":"3","windows":0},
+        {"name":"special:probe","windows":1},
+        {"name":"special:other","windows":1}
+    ]);
+    parts[3] = json!([
+        {"workspace":{"name":"special:probe"},"mapped":true,"floating":false},
+        {"workspace":{"name":"special:other"},"mapped":true,"floating":false}
+    ]);
+    for selector in [
+        "special:probe",
+        "s[true]",
+        "s[true] w[t1]",
+        "name:special:probe",
+    ] {
+        parts[2] = json!([{ "workspaceString":selector,"gapsOut":[7]}]);
+        assert_margins(&parts, "eDP-1", [7.0, 58.0, 7.0, 7.0]);
+    }
+    // An empty specialWorkspace must fall back to the ordinary workspace, and
+    // missing ids on unrelated workspaces must never compare equal.
+    for empty in [json!({}), json!({"id":0,"name":""}), json!({"name":""})] {
+        parts[0][0]["specialWorkspace"] = empty;
+        assert_margins(&parts, "eDP-1", [2.0, 53.0, 2.0, 2.0]);
+    }
+}

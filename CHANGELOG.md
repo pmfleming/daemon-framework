@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Accept Hyprland 0.57 special workspaces without numeric IDs, preserving their
+  names/addresses and resolving geometry by identity without treating absence as
+  workspace zero. Decode bounded IPC text lossily while retaining JSON errors;
+  reject monitor identifiers containing batch delimiters before pinning windows.
+  Captured 0.56.2/0.57.1 fixtures and nested acceptance evidence cover the upgrade.
+
 - Include current and initial application classes in workspace window snapshots
   for presentation; missing class fields remain compatible with older snapshots.
 

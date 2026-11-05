@@ -77,7 +77,7 @@ pub fn command(output: &str, rule: Rule<'_>) -> Result<String> {
     ))
 }
 
-fn identifier(value: &str) -> bool {
+pub(crate) fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()

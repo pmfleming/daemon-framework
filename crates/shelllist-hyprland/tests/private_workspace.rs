@@ -155,7 +155,8 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     let monitor = &initial.monitors[0];
     workspace::execute(
         &client,
-        &workspace::focus_local(&monitor.name, monitor.active_workspace.id, 6, true).unwrap(),
+        &workspace::focus_local(&monitor.name, monitor.active_workspace.id.unwrap(), 6, true)
+            .unwrap(),
     )
     .await
     .unwrap();
@@ -185,7 +186,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let target = target.expect("test window did not map");
-    assert_eq!(target.workspace.id, 6);
+    assert_eq!(target.workspace.id, Some(6));
     let pinned = workspace::pinned_snapshot(&client, &monitor.name, 6, "probe-1")
         .await
         .unwrap();
@@ -212,7 +213,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
             .unwrap()
             .active_workspace
             .id,
-        6,
+        Some(6),
         "silent placement must not follow the moved active window"
     );
     assert!(
@@ -278,8 +279,8 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
             &client,
             &workspace::focus_local(
                 &other.name,
-                other.active_workspace.id,
-                source.active_workspace.id,
+                other.active_workspace.id.unwrap(),
+                source.active_workspace.id.unwrap(),
                 true
             )
             .unwrap()
@@ -296,7 +297,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
         .clone();
     workspace::execute(
         &client,
-        &workspace::focus_local(&other.name, other.active_workspace.id, 8, false).unwrap(),
+        &workspace::focus_local(&other.name, other.active_workspace.id.unwrap(), 8, false).unwrap(),
     )
     .await
     .unwrap();
@@ -313,6 +314,21 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
             .unwrap()
             .active_workspace
             .id,
-        8
+        Some(8)
     );
+    // Real special workspaces must remain readable on 0.57, where id is absent.
+    workspace::execute(
+        &client,
+        "local r=hl.dispatch(hl.dsp.workspace.toggle_special('ipc-probe')); assert(r.ok,r.error)",
+    )
+    .await
+    .unwrap();
+    let special = workspace::snapshot(&client).await.unwrap();
+    assert!(
+        special
+            .workspaces
+            .iter()
+            .any(|w| w.id.is_none_or(|id| id < 0))
+    );
+    assert!(!client.work_areas().await.unwrap().is_empty());
 }

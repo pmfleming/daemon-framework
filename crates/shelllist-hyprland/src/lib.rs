@@ -337,7 +337,7 @@ async fn read_event(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<S
             bytes.pop();
         }
     }
-    Ok(Some(String::from_utf8(bytes)?))
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 async fn request_socket(mut stream: UnixStream, command: &str) -> Result<String> {
@@ -352,7 +352,7 @@ async fn request_socket(mut stream: UnixStream, command: &str) -> Result<String>
         response.len() as u64 <= MAX_REPLY_BYTES,
         "Hyprland reply is too large"
     );
-    String::from_utf8(response).context("Hyprland reply is not valid UTF-8")
+    Ok(String::from_utf8_lossy(&response).into_owned())
 }
 
 fn default_runtime_dir() -> PathBuf {
@@ -469,13 +469,20 @@ mod tests {
             server.await.unwrap();
         }
         let (_root, client, server) = command_server("j/clients", [0xff]).await;
+        assert_eq!(client.request_exact("j/clients").await.unwrap(), "\u{fffd}");
+        server.await.unwrap();
+        let (_root, client, server) =
+            command_server("j/clients", b"[{\"title\":\"bad \xff\"}]").await;
+        let reply = client.request_exact("j/clients").await.unwrap();
+        let windows: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(windows[0]["title"], "bad \u{fffd}");
+        server.await.unwrap();
+        let (_root, client, server) = command_server("j/clients", b"[\xff]").await;
         assert!(
-            client
-                .request_exact("j/clients")
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("UTF-8")
+            serde_json::from_str::<serde_json::Value>(
+                &client.request_exact("j/clients").await.unwrap()
+            )
+            .is_err()
         );
         server.await.unwrap();
         let (_root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
@@ -501,7 +508,6 @@ mod tests {
                 vec![b'x'; super::MAX_EVENT_BYTES as usize + 1],
                 Some("too large"),
             ),
-            (b"\xff\n".to_vec(), Some("utf-8")),
         ] {
             let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
             let (sender, mut events) = mpsc::channel(8);
@@ -530,11 +536,15 @@ mod tests {
 
     #[tokio::test]
     async fn command_errors_after_connect_do_not_replay_on_another_instance() {
-        let (root, client, server) = command_server("dispatch test", [0xff]).await;
+        let (root, client, server) = command_server(
+            "dispatch test",
+            vec![b'x'; super::MAX_REPLY_BYTES as usize + 1],
+        )
+        .await;
         let fallback = root.path().join("hypr/fallback");
         fs::create_dir_all(&fallback).await.unwrap();
         let fallback = tokio::net::UnixListener::bind(fallback.join(COMMAND_SOCKET)).unwrap();
-        // Invalid UTF-8 reply after command execution must not trigger failover.
+        // An oversized reply after command execution must not trigger failover.
         assert!(client.request("dispatch test").await.is_err());
         server.await.unwrap();
         assert!(
@@ -551,6 +561,18 @@ mod tests {
         let task = tokio::spawn(watch_events_with(client, sender, |event| event));
         let (mut stream, _) = listener.accept().await.unwrap();
         assert_eq!(events.recv().await.unwrap(), Event::Connected);
+        stream
+            .write_all(b"windowtitlev2>>123,bad \xff\nworkspace>>1\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            Event::Message("windowtitlev2>>123,bad \u{fffd}".into())
+        );
+        assert_eq!(
+            events.recv().await.unwrap(),
+            Event::Message("workspace>>1".into())
+        );
         let boundary = "x".repeat(super::MAX_EVENT_BYTES as usize - 2);
         for line in ["openwindow>>123,1,app,title", "", &boundary] {
             stream

@@ -49,7 +49,9 @@ operations to fail explicitly instead of enabling discovery fallback.
 constructors remain infallible. An absent signature still permits ordinary discovery.
 Event connections include discovery in the same deadline; event lines are capped
 at 64 KiB including their terminator, even when a peer never sends a newline.
-Oversized or invalid UTF-8 events disconnect and reconnect with normal backoff.
+Replies and event text replace invalid UTF-8 with U+FFFD; invalid JSON still
+fails at the typed read. Size limits apply to raw bytes before decoding.
+Oversized events disconnect and reconnect with normal backoff.
 Idle event streams have no read timeout, and receiver closure cancels all phases.
 `watch_events_detailed` reports `Connected`, `Disconnected(Option<String>)`,
 `ConnectFailed(String)`, and raw `Message` events. Disconnections carry a cause

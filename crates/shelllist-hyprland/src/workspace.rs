@@ -6,14 +6,53 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Workspace {
-    pub id: i64,
+    pub id: Option<i64>,
     pub monitor: String,
     pub windows: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkspaceId {
-    pub id: i64,
+    pub id: Option<i64>,
+}
+
+/// Workspace identity across numbered and special workspaces. Hyprland 0.57
+/// omits `id` for special workspaces; never interpret absence as workspace zero.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "WorkspaceRefWire")]
+pub struct WorkspaceRef {
+    pub id: Option<i64>,
+    pub address: Option<String>,
+    pub name: String,
+    pub special: bool,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceRefWire {
+    id: Option<i64>,
+    address: Option<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+impl From<WorkspaceRefWire> for WorkspaceRef {
+    fn from(value: WorkspaceRefWire) -> Self {
+        let special = value.kind.as_deref() == Some("special")
+            || value.name.starts_with("special:")
+            || value
+                .address
+                .as_deref()
+                .is_some_and(|s| s.starts_with("special:"))
+            || value.id.is_some_and(|id| (-1336..-1).contains(&id));
+        Self {
+            id: value.id,
+            address: value.address,
+            name: value.name,
+            special,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,7 +67,7 @@ pub struct Monitor {
 pub struct Window {
     pub address: String,
     pub pid: u32,
-    pub workspace: WorkspaceId,
+    pub workspace: WorkspaceRef,
     pub mapped: bool,
     #[serde(default, rename = "class")]
     pub class: String,
@@ -70,6 +109,10 @@ pub async fn pinned_snapshot(
         .context("compositor session required")?
         .to_owned();
     let prefix = token_literal(prefix)?;
+    ensure!(
+        crate::monitor::identifier(monitor),
+        "invalid monitor identifier"
+    );
     let monitor = quote(monitor)?;
     // No semicolons inside the expression: the IPC batch delimiter is ';'.
     let expression = format!(
@@ -226,7 +269,10 @@ pub fn replace_pinned(
     let movement = move_local(
         &candidate.address,
         candidate.pid,
-        candidate.workspace.id,
+        candidate
+            .workspace
+            .id
+            .context("ordinary workspace required")?,
         destination,
         monitor,
     )?;
@@ -345,6 +391,74 @@ fn window_guard(address: &str, pid: u32, workspace: i64) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pin_snapshot_rejects_batch_delimiters_before_connecting() {
+        let client = Client::new("/unused".into(), Some("test".into()));
+        let error = pinned_snapshot(&client, "DP;j/x", 6, "probe")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid monitor identifier"));
+    }
+
+    #[test]
+    fn captured_snapshots_and_work_areas_accept_both_workspace_shapes() {
+        for (version, special, text) in [
+            (
+                "0.56.2",
+                false,
+                include_str!("../tests/fixtures/0.56.2/regular.json"),
+            ),
+            (
+                "0.56.2",
+                true,
+                include_str!("../tests/fixtures/0.56.2/special.json"),
+            ),
+            (
+                "0.57.1",
+                false,
+                include_str!("../tests/fixtures/0.57.1/regular.json"),
+            ),
+            (
+                "0.57.1",
+                true,
+                include_str!("../tests/fixtures/0.57.1/special.json"),
+            ),
+        ] {
+            let fixture: serde_json::Value = serde_json::from_str(text).unwrap();
+            let batch = |keys: &[&str]| {
+                keys.iter()
+                    .map(|key| fixture[key].to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            };
+            let snapshot = parse_snapshot(
+                "fixture".into(),
+                &batch(&["monitors", "workspaces", "clients"]),
+            )
+            .unwrap();
+            let window = &snapshot.windows[0];
+            assert_eq!(window.workspace.special, special);
+            if special && version == "0.57.1" {
+                assert_eq!(window.workspace.id, None);
+                assert_eq!(
+                    window.workspace.address.as_deref(),
+                    Some("special:ipc-probe")
+                );
+            } else {
+                assert!(window.workspace.id.is_some());
+            }
+            let areas = crate::work_area::parse_work_areas(&batch(&[
+                "monitors",
+                "workspaces",
+                "workspacerules",
+                "clients",
+                "gaps",
+            ]))
+            .unwrap();
+            assert_eq!(areas.len(), snapshot.monitors.len());
+        }
+    }
 
     #[test]
     fn selection_checks_existence_before_dispatch_and_guards_focus() {
