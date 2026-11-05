@@ -32,7 +32,8 @@ use tokio::{
 };
 
 const IPC_TIMEOUT: Duration = Duration::from_secs(2);
-const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const RECONNECT_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(8);
 const COMMAND_SOCKET: &str = ".socket.sock";
 const EVENT_SOCKET: &str = ".socket2.sock";
 const MAX_EVENT_BYTES: u64 = 64 * 1024;
@@ -42,6 +43,7 @@ const MAX_REPLY_BYTES: u64 = 16 * 1024 * 1024;
 pub struct Client {
     runtime_dir: PathBuf,
     signature: Option<OsString>,
+    ipc_timeout: Duration,
     capabilities: std::sync::Arc<tokio::sync::OnceCell<capabilities::Capabilities>>,
 }
 
@@ -61,6 +63,7 @@ impl Client {
             runtime_dir,
             signature: env::var_os("HYPRLAND_INSTANCE_SIGNATURE"),
             capabilities: Default::default(),
+            ipc_timeout: IPC_TIMEOUT,
         }
     }
 
@@ -72,7 +75,14 @@ impl Client {
             runtime_dir,
             signature: signature.map(OsString::from),
             capabilities: Default::default(),
+            ipc_timeout: IPC_TIMEOUT,
         }
+    }
+
+    #[must_use]
+    pub fn with_ipc_timeout(mut self, timeout: Duration) -> Self {
+        self.ipc_timeout = timeout;
+        self
     }
 
     /// The configured signature, distinguishing absent from invalid configuration.
@@ -128,7 +138,7 @@ impl Client {
     }
 
     async fn request_with(&self, command: &str, exact: bool) -> Result<String> {
-        let deadline = time::Instant::now() + IPC_TIMEOUT;
+        let deadline = time::Instant::now() + self.ipc_timeout;
         let (stream, _) = self.connect_before(COMMAND_SOCKET, exact, deadline).await?;
         time::timeout_at(deadline, request_socket(stream, command))
             .await
@@ -173,7 +183,7 @@ impl Client {
 
     pub async fn event_socket(&self) -> Result<UnixStream> {
         Ok(self
-            .connect_before(EVENT_SOCKET, false, time::Instant::now() + IPC_TIMEOUT)
+            .connect_before(EVENT_SOCKET, false, time::Instant::now() + self.ipc_timeout)
             .await?
             .0)
     }
@@ -367,14 +377,21 @@ async fn reconnect_events(
     sender: &mpsc::Sender<Event>,
 ) -> Result<(), mpsc::error::SendError<Event>> {
     let mut last_connect_error = None;
+    let mut delay = RECONNECT_MIN;
     loop {
         match client
-            .connect_before(EVENT_SOCKET, false, time::Instant::now() + IPC_TIMEOUT)
+            .connect_before(
+                EVENT_SOCKET,
+                false,
+                time::Instant::now() + client.ipc_timeout,
+            )
             .await
         {
             Ok((stream, instance)) => {
                 last_connect_error = None;
-                forward_events(stream, instance, sender).await?;
+                if forward_events(stream, instance, sender).await? {
+                    delay = RECONNECT_MIN;
+                }
             }
             Err(error) => {
                 if let Some(IpcError::SessionGone { configured, live }) =
@@ -395,7 +412,8 @@ async fn reconnect_events(
                 }
             }
         }
-        time::sleep(RECONNECT_DELAY).await;
+        time::sleep(delay).await;
+        delay = (delay * 2).min(RECONNECT_MAX);
     }
 }
 
@@ -403,10 +421,12 @@ async fn forward_events(
     stream: UnixStream,
     instance: String,
     sender: &mpsc::Sender<Event>,
-) -> Result<(), mpsc::error::SendError<Event>> {
+) -> Result<bool, mpsc::error::SendError<Event>> {
     sender.send(Event::Connected { instance }).await?;
     let mut reader = BufReader::new(stream);
     let mut lagged = false;
+    let started = time::Instant::now();
+    let mut received = false;
     let cause = loop {
         // Keep the same read future alive while delivering pending loss. Dropping
         // read_until midway could otherwise discard an unterminated frame.
@@ -426,6 +446,7 @@ async fn forward_events(
         };
         match result {
             Ok(Some(line)) => {
+                received = true;
                 if lagged {
                     match sender.try_send(Event::Lagged) {
                         Ok(()) => lagged = false,
@@ -450,7 +471,8 @@ async fn forward_events(
     if lagged {
         sender.send(Event::Lagged).await?;
     }
-    sender.send(Event::Disconnected(cause)).await
+    sender.send(Event::Disconnected(cause)).await?;
+    Ok(received || started.elapsed() >= RECONNECT_MIN)
 }
 
 // Bound an unterminated line too: read_line/lines would otherwise grow forever.
@@ -514,7 +536,7 @@ fn valid_signature(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMAND_SOCKET, Client, EVENT_SOCKET, Event};
+    use super::{COMMAND_SOCKET, Client, EVENT_SOCKET, Event, IPC_TIMEOUT};
     use std::time::Duration;
     use tokio::{
         fs,
@@ -530,6 +552,69 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(instance.join(socket)).unwrap();
         let client = Client::new(root.path().into(), Some("test".into()));
         (root, client, listener)
+    }
+
+    #[tokio::test]
+    async fn reconnect_backoff_caps_and_resets_only_after_a_healthy_connection() {
+        let (_root, client, listener) = socket_fixture(EVENT_SOCKET).await;
+        let (sender, mut events) = mpsc::channel(32);
+        let watcher = tokio::spawn(client.watch_events(sender));
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert!(matches!(events.recv().await, Some(Event::Connected { .. })));
+        time::pause();
+        for seconds in [1, 2, 4, 8, 8] {
+            drop(stream);
+            assert_eq!(events.recv().await, Some(Event::Disconnected(None)));
+            time::advance(Duration::from_millis(seconds * 1000 - 1)).await;
+            assert!(
+                time::timeout(Duration::ZERO, listener.accept())
+                    .await
+                    .is_err()
+            );
+            time::advance(Duration::from_millis(1)).await;
+            (stream, _) = time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(events.recv().await, Some(Event::Connected { .. })));
+        }
+        stream.write_all(b"workspacev2>>6,6\n").await.unwrap();
+        assert!(matches!(events.recv().await, Some(Event::Compositor(_))));
+        drop(stream);
+        assert_eq!(events.recv().await, Some(Event::Disconnected(None)));
+        time::advance(Duration::from_millis(999)).await;
+        assert!(
+            time::timeout(Duration::ZERO, listener.accept())
+                .await
+                .is_err()
+        );
+        time::advance(Duration::from_millis(1)).await;
+        let (_stream, _) = time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(events.recv().await, Some(Event::Connected { .. })));
+        drop(events);
+        watcher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_timeout_bounds_the_exchange_instead_of_the_default() {
+        let (_root, client, listener) = socket_fixture(COMMAND_SOCKET).await;
+        let client = client.with_ipc_timeout(Duration::from_secs(3));
+        let request = tokio::spawn(async move { client.request_exact("test").await });
+        let (mut stream, _) = listener.accept().await.unwrap();
+        stream.read_to_end(&mut Vec::new()).await.unwrap();
+        time::pause();
+        let start = time::Instant::now();
+        let error = request.await.unwrap().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<super::IpcError>(),
+            Some(&super::IpcError::OutcomeUnknown)
+        );
+        assert!(start.elapsed() > Duration::from_secs(2));
+        // Tokio's timer wheel rounds deadlines to a millisecond tick.
+        assert!(start.elapsed() <= Duration::from_millis(3010));
     }
 
     pub(crate) async fn command_server(
@@ -703,6 +788,7 @@ mod tests {
                 runtime_dir: root.path().into(),
                 signature: Some(signature),
                 capabilities: Default::default(),
+                ipc_timeout: IPC_TIMEOUT,
             };
             for error in [
                 client.request("j/clients").await.unwrap_err(),

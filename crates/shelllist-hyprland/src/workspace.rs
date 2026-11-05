@@ -281,6 +281,15 @@ pub fn release_window(token: &str) -> Result<Lua> {
     )))
 }
 
+/// Release only tokens in the caller-owned namespace. No window is moved or
+/// closed; callers must fence old journal observers before admitting new pins.
+pub fn release_prefix(prefix: &str) -> Result<Lua> {
+    let prefix = token_literal(prefix)?;
+    Ok(Lua(format!(
+        "if __shelllist_window_refs then for key in pairs(__shelllist_window_refs) do if type(key)=='string' and key:sub(1,#{prefix})=={prefix} then __shelllist_window_refs[key]=nil end end end"
+    )))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinnedState {
     Present,

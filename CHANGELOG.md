@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Make the shared connect/exchange deadline configurable and back off reconnects
+  from one to eight seconds, resetting after a healthy stream. Add prefix-scoped
+  reference release for bar journal recovery after pin-before-admission crashes.
+
 - Share window/workspace display fields and a single-turn status batch across
   app/bar and portal consumers. Preserve optional special-workspace identity,
   required snapshot identity, default unfocused rank, per-window address

@@ -36,7 +36,8 @@ signatures fail explicitly. Socket ownership, protected instance directories,
 symlink rejection and connected peer credentials are checked before exchange.
 Commands are never replayed after a connection succeeds.
 
-Discovery, connection and command exchange share one two-second deadline.
+Discovery, connection and command exchange share one deadline, defaulting to
+two seconds. `Client::with_ipc_timeout` overrides it for that client.
 Downcast `anyhow::Error` to `IpcError` to distinguish `NotDelivered`,
 `OutcomeUnknown`, `Rejected`, `InvalidReply` and `SessionGone`. A timeout before
 connection is not delivered; an exchange timeout or I/O failure has an unknown
@@ -63,7 +64,9 @@ Event intake uses nonblocking sends. A full consumer channel drops compositor
 notifications and delivers one pending `Lagged` when capacity becomes available,
 even if the socket then goes idle. Connection controls are never dropped.
 Receiver closure cancels connection attempts, reads, control sends and backoff.
-The reconnect delay is one second, including accept-then-EOF failures; identical
+Reconnect delays grow from one to eight seconds, including accept-then-EOF
+failures. Receiving a frame or staying connected for one second resets the delay.
+Identical
 consecutive connection failures are suppressed until their cause changes or a
 connection succeeds. Quiet healthy streams have no idle timeout.
 
