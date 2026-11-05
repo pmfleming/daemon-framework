@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep the special-workspace toggle helper and its API check in private
+  acceptance; unused test APIs no longer gate production mutations.
+
 - Preserve numberless named workspace identities in events, workspace/monitor
   reads and literal destination selectors. Capture real private 0.57.1 named
   JSON/events and verify numbered pin guards still reject named destinations.

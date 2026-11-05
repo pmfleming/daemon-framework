@@ -20,7 +20,6 @@ pub const LUA_APIS: &[&str] = &[
     "hl.dsp.window.move",
     "hl.dsp.window.close",
     "hl.config",
-    "hl.dsp.workspace.toggle_special",
 ];
 
 pub fn probe() -> String {

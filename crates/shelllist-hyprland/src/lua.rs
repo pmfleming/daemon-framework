@@ -65,13 +65,6 @@ pub fn close_window(address: &str) -> Result<Lua> {
         "hl.dsp.window.close({{ window = 'address:{address}' }})"
     )))
 }
-pub fn toggle_special(name: &str) -> Result<Lua> {
-    ensure!(!name.is_empty(), "empty special workspace name");
-    Ok(dispatch(format!(
-        "hl.dsp.workspace.toggle_special({})",
-        quote(name)?
-    )))
-}
 pub fn move_window(address: &str, workspace: &str) -> Result<Lua> {
     let address = crate::WindowAddress::parse(address)?;
     ensure!(

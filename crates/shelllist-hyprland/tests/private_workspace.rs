@@ -448,12 +448,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
         Some(8)
     );
     // Real special workspaces must remain readable on 0.57, where id is absent.
-    workspace::execute(
-        &client,
-        &shelllist_hyprland::lua::toggle_special("ipc-probe").unwrap(),
-    )
-    .await
-    .unwrap();
+    toggle_special(&client, "ipc-probe").await;
     let special = workspace::snapshot(&client).await.unwrap();
     assert!(
         special
@@ -522,12 +517,7 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     .await
     .unwrap();
     // Capture a real named regular workspace: 0.57 gives it an address but no id.
-    workspace::execute(
-        &client,
-        &shelllist_hyprland::lua::toggle_special("ipc-probe").unwrap(),
-    )
-    .await
-    .unwrap();
+    toggle_special(&client, "ipc-probe").await;
     let raw_events = tokio::net::UnixStream::connect(
         root.join("hypr")
             .join(client.instance_signature().unwrap().unwrap())
@@ -632,6 +622,14 @@ async fn installed_compositor_rejects_moved_targets_and_normally_closes_matching
     event_task.await.unwrap();
 }
 
+// Acceptance-only API: a rename must fail this gate, not every production mutation.
+async fn toggle_special(client: &Client, name: &str) {
+    let name = workspace::quote(name).unwrap();
+    shelllist_hyprland::ack(&client.request_exact(&format!(
+        "eval assert(type(hl.dsp.workspace.toggle_special)=='function'); local r=hl.dispatch(hl.dsp.workspace.toggle_special({name})); assert(r.ok,r.error)"
+    )).await.unwrap()).unwrap();
+}
+
 async fn compile_builders_without_effects(client: &Client) {
     use shelllist_hyprland::{
         lua,
@@ -656,7 +654,6 @@ async fn compile_builders_without_effects(client: &Client) {
         lua::focus_window("0x123").unwrap(),
         lua::close_window("0x123").unwrap(),
         lua::move_window("0x123", "6").unwrap(),
-        lua::toggle_special("compile-only").unwrap(),
         lua::configure(&std::collections::BTreeMap::from([(
             "cursor:no_warps".into(),
             serde_json::json!(true),

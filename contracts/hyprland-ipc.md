@@ -55,7 +55,9 @@ rollback restores the compositor and consumers together.
 - Rust builders return `Lua` without `eval`. `execute` is the shared mutation
   path. `Lua::then` composes validated sources within one compositor turn.
 - Before effects, capabilities require Lua, the minimum version and all APIs in
-  `capabilities::LUA_APIS`. The probe checks function types without dispatching.
+  `capabilities::LUA_APIS`. Only production builders contribute requirements;
+  special-workspace toggling is an acceptance-only check. The probe checks
+  function types without dispatching.
   Only successful checks are cached, bound to that immutable exact-session client.
   Failed/transient checks are retried on the next call. Typed reads remain usable
   independently of mutation capabilities.
