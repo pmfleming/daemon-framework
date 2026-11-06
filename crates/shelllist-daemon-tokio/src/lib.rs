@@ -33,3 +33,6 @@ pub use jsonl::{JsonlClientConfig, run_jsonl_client, run_jsonl_client_with_input
 pub use output_actor::{BasicCorrelation, CorrelationPolicy, TrackedId, TrackedKind};
 pub use shutdown::wait_for_shutdown;
 pub use subscription::{OwnedTaskRegistry, TaskAdmissionError, TaskLimits};
+
+mod polkit;
+pub use polkit::authorize_polkit;
