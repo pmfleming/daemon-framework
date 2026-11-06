@@ -24,7 +24,10 @@ mod shutdown;
 pub use service::{Admitted, ServiceBoundary};
 mod task;
 
-pub use resume::{ResumeDetector, monitor_resumes, suspend_offset};
+pub use resume::{
+    ResumeDetector, SleepObservation, SleepTransitionDetector, monitor_resumes,
+    monitor_sleep_transitions, suspend_offset,
+};
 pub use task::{AbortOnDrop, TaskGroup, catch_task, spawn_named};
 mod subscription;
 

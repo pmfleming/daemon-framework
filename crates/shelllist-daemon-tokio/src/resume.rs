@@ -59,43 +59,128 @@ impl ResumeDetector {
     }
 }
 
-/// Publishes a monotonic generation; stops when the last consumer leaves.
-pub async fn monitor_resumes(sender: watch::Sender<u64>) {
-    let (events, mut signals) = mpsc::channel(8);
-    let task = spawn_named("logind-resumes", logind_events(events));
+/// Read-only sleep preparation and a monotonic resume generation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SleepObservation {
+    pub preparing: bool,
+    pub resume_generation: u64,
+}
+
+/// Shared transition semantics for observers and policy owners. Initial readback
+/// is not a resume; real signals and suspend-clock changes are deduplicated.
+#[derive(Default)]
+pub struct SleepTransitionDetector {
+    state: SleepObservation,
+    resumes: ResumeDetector,
+}
+impl SleepTransitionDetector {
+    #[must_use]
+    pub fn state(&self) -> SleepObservation {
+        self.state
+    }
+    pub fn poll(&mut self, offset: Option<i128>) -> SleepObservation {
+        if self.resumes.poll(offset) {
+            self.resumed();
+        }
+        self.state
+    }
+    pub fn signal(&mut self, preparing: bool, offset: Option<i128>) -> SleepObservation {
+        if !preparing && self.resumes.signal(offset) {
+            self.resumed();
+        }
+        self.state.preparing = preparing;
+        self.state
+    }
+    pub fn readback(&mut self, preparing: bool, offset: Option<i128>) -> SleepObservation {
+        if self.state.preparing && !preparing {
+            return self.signal(false, offset);
+        }
+        self.state.preparing = preparing;
+        self.state
+    }
+    fn resumed(&mut self) {
+        self.state.preparing = false;
+        self.state.resume_generation = self.state.resume_generation.saturating_add(1);
+    }
+}
+
+enum SleepInput {
+    Readback(bool),
+    Signal(bool),
+}
+
+/// Publishes preparation and resume changes without power policy or telemetry.
+/// Dropping the last receiver cancels bus connection, reads and reconnect delay.
+pub async fn monitor_sleep_transitions(sender: watch::Sender<SleepObservation>) {
+    let (events, mut signals) = mpsc::channel(16);
+    let task = spawn_named("logind-sleep-observation", logind_events(events));
     let _logind = AbortOnDrop(task.abort_handle());
     let mut poll = interval(Duration::from_secs(2));
     poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut detector = ResumeDetector::default();
+    let mut detector = SleepTransitionDetector {
+        state: *sender.borrow(),
+        ..Default::default()
+    };
+    detector.poll(suspend_offset());
     loop {
-        let announce = tokio::select! {
+        let state = tokio::select! {
             _ = sender.closed() => return,
             _ = poll.tick() => detector.poll(suspend_offset()),
-            Some(()) = signals.recv() => detector.signal(suspend_offset()),
+            event = signals.recv() => match event {
+                Some(SleepInput::Signal(preparing)) => detector.signal(preparing, suspend_offset()),
+                Some(SleepInput::Readback(preparing)) => detector.readback(preparing, suspend_offset()),
+                None => return,
+            },
         };
-        if announce {
-            sender.send_modify(|generation| *generation = generation.saturating_add(1));
-        }
+        sender.send_if_modified(|current| {
+            if *current == state {
+                false
+            } else {
+                *current = state;
+                true
+            }
+        });
     }
 }
 
-async fn logind_events(sender: mpsc::Sender<()>) {
+/// Publishes a monotonic generation; stops when the last consumer leaves.
+pub async fn monitor_resumes(sender: watch::Sender<u64>) {
+    let base = *sender.borrow();
+    let (observations, mut changes) = watch::channel(SleepObservation::default());
+    let forward = async {
+        loop {
+            tokio::select! { _ = sender.closed() => return, result = changes.changed() => if result.is_err() { return; } }
+            let generation = base.saturating_add(changes.borrow_and_update().resume_generation);
+            sender.send_if_modified(|current| {
+                if *current == generation {
+                    false
+                } else {
+                    *current = generation;
+                    true
+                }
+            });
+        }
+    };
+    tokio::select! { _ = monitor_sleep_transitions(observations) => {}, _ = forward => {} }
+}
+
+async fn logind_events(sender: mpsc::Sender<SleepInput>) {
     let reconnect = async {
-        while let Err(error) = logind_connection(&sender).await {
-            tracing::debug!(%error, "logind resume stream unavailable; clock fallback remains active");
+        loop {
+            if let Err(error) = logind_connection(&sender).await {
+                tracing::debug!(%error, "logind observation unavailable; clock fallback remains active");
+            }
             sleep(Duration::from_secs(3)).await;
         }
     };
-    // One cancellation boundary covers connection, signal reads, sends and backoff.
-    tokio::select! {
-        biased;
-        _ = sender.closed() => {},
-        _ = reconnect => {},
-    }
+    tokio::select! { _ = sender.closed() => {}, _ = reconnect => {} }
 }
 
-async fn logind_connection(sender: &mpsc::Sender<()>) -> anyhow::Result<()> {
-    let connection = zbus::Connection::system().await?;
+async fn logind_connection(sender: &mpsc::Sender<SleepInput>) -> anyhow::Result<()> {
+    let connection = zbus::connection::Builder::system()?
+        .method_timeout(Duration::from_secs(3))
+        .build()
+        .await?;
     let proxy = zbus::Proxy::new(
         &connection,
         "org.freedesktop.login1",
@@ -104,18 +189,46 @@ async fn logind_connection(sender: &mpsc::Sender<()>) -> anyhow::Result<()> {
     )
     .await?;
     let mut signals = proxy.receive_signal("PrepareForSleep").await?;
-    while let Some(signal) = signals.next().await {
-        let (preparing,): (bool,) = signal.body().deserialize()?;
-        if !preparing && sender.send(()).await.is_err() {
-            return Ok(());
+    match proxy.get_property::<bool>("PreparingForSleep").await {
+        Ok(preparing) => {
+            sender.send(SleepInput::Readback(preparing)).await?;
+        }
+        Err(error) => {
+            tracing::debug!(%error, "initial sleep read unavailable; observing signals and clock")
         }
     }
-    anyhow::bail!("logind resume stream ended")
+    while let Some(signal) = signals.next().await {
+        let (preparing,): (bool,) = signal.body().deserialize()?;
+        sender.send(SleepInput::Signal(preparing)).await?;
+    }
+    anyhow::bail!("logind sleep stream ended")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ResumeDetector;
+    use super::{ResumeDetector, SleepTransitionDetector};
+    #[test]
+    fn readback_does_not_resume_and_clock_and_signals_share_one_generation() {
+        let mut detector = SleepTransitionDetector::default();
+        detector.poll(Some(0));
+        assert_eq!(detector.readback(false, Some(0)).resume_generation, 0);
+        assert!(detector.signal(true, Some(0)).preparing);
+        assert_eq!(detector.poll(Some(1_000_000_000)).resume_generation, 1);
+        assert_eq!(
+            detector
+                .signal(false, Some(1_000_000_000))
+                .resume_generation,
+            1
+        );
+        detector.signal(true, Some(1_000_000_000));
+        assert_eq!(
+            detector
+                .signal(false, Some(2_000_000_000))
+                .resume_generation,
+            2
+        );
+        assert_eq!(detector.poll(Some(2_000_000_000)).resume_generation, 2);
+    }
     #[test]
     fn resume_detection_ignores_stalls_and_deduplicates_signal_and_clock() {
         let mut detector = ResumeDetector::default();
