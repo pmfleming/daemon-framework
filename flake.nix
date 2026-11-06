@@ -47,6 +47,7 @@
             members = [
               "shelllist-daemon-core"
               "shelllist-daemon-tokio"
+              "shelllist-search"
               "shelllist-hyprland"
             ];
             workspace = (pkgs.formats.toml { }).generate "Cargo.toml" (

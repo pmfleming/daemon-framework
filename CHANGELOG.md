@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Move Shelllist's fuzzy matcher into the shared `shelllist-search` library.
+  Preserve scoring, Unicode normalization and prepared-catalog reuse; bar-daemon
+  now owns runtime ranking instead of a frontend-spawned JSONL worker.
+
 - Parse valid Hyprland prerelease/build suffixes without dropping the numeric
   minimum, malformed-version checks or runtime API validation.
 

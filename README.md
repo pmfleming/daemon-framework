@@ -9,6 +9,7 @@ Shared Rust infrastructure for Shelllist's five domain daemons: `app-daemon`, `b
 | `shelllist-daemon-core` | Protocol envelopes, JSONL wire types, fixtures, staged/atomic files, bounded reads and owner-scoped operations |
 | `shelllist-daemon-tokio` | D-Bus/JSONL transport, subscriptions, connection-scoped owner monitoring, task groups, bounded blocking lanes, resume detection and async file helpers |
 | `shelllist-hyprland` | Optional bounded Hyprland IPC, typed monitor-command encoding, work-area and compositor-preference interpretation |
+| `shelllist-search` | Prepared catalogs and deterministic Unicode, fuzzy and typo-tolerant result ranking; execution and caller lifetimes belong to the consuming daemon |
 | `shelllist-local-build` | Native snapshot/build CLI and source-policy tests; not a daemon dependency |
 
 `shelllist-protocol-js` is a binary in **shelllist-daemon-core**, not a separate crate. It generates frontend constants from daemon-owned registries.
@@ -19,7 +20,7 @@ their existing `schemaError`, `eventError`, `requestError` and `responseError` A
 forward to that module. URI imports work through both source and packaged module
 paths. Generate/check the runtime and clients together; never hand-edit outputs.
 
-Domain schemas, validation, persistence policy and effects stay in their owning daemons; fuzzy ranking and UI policy stay in Shelllist. Hyprland does not become a core/Tokio dependency: app/bar consume its crate directly, bar owns shared cache/subscriber lifetimes, and Shelllist owns placement/animation. See [Hyprland APIs](crates/shelllist-hyprland/README.md) and [server lifecycle guarantees](docs/server-infrastructure.md).
+Domain schemas, validation, persistence policy and effects stay in their owning daemons. `shelllist-search` provides shared fuzzy/typo ranking; bar-daemon owns ephemeral transport-scoped catalogs and query execution. Shelllist retains selection, keyboard navigation and unsaved field drafts. Hyprland does not become a core/Tokio dependency: app/bar consume its crate directly, bar owns shared cache/subscriber lifetimes, and Shelllist owns placement/animation. See [Hyprland APIs](crates/shelllist-hyprland/README.md) and [server lifecycle guarantees](docs/server-infrastructure.md).
 
 ## Current-source development
 
