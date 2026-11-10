@@ -88,3 +88,9 @@
 - Moved `shelllist-search` into the workspace without changing its binary or JSONL contract.
 - Added versioned API/event envelope builders, protocol fixture helpers, monotonic IDs, and secure atomic JSON state helpers.
 - Added a shared ordered JSONL client runner with configurable correlation, cancellation, and call-failure policies.
+
+- Add optional typed monitor attributes (explicit VRR, bit depth, color preset,
+  SDR brightness/saturation) through `monitor::command_with_advanced`. Existing
+  `command` output is unchanged. Validation bounds numeric inputs and rejects
+  arbitrary color strings; callers retain capability checks and observed-state
+  confirmation/rollback ownership.

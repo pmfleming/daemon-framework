@@ -104,3 +104,44 @@ fn commands_reject_injection_invalid_geometry_and_unintended_outputs() {
         );
     }
 }
+
+#[test]
+fn advanced_fields_are_optional_bounded_and_not_lua_expressions() {
+    use super::{Advanced, command_with_advanced};
+    let rule = configured(Mode::Preferred, 1.0, None, "");
+    let advanced = Advanced {
+        vrr: Some(true),
+        bit_depth: Some(10),
+        color: Some("hdr"),
+        sdr_brightness: Some(1.2),
+        sdr_saturation: Some(0.9),
+    };
+    let lua = command_with_advanced("DP-1", rule, advanced).unwrap();
+    assert!(lua.contains(
+        "vrr = 1, bitdepth = 10, cm = \"hdr\", sdrbrightness = 1.2, sdrsaturation = 0.9"
+    ));
+    for bad in [
+        Advanced {
+            color: Some("hdr\"}); bad()--"),
+            ..advanced
+        },
+        Advanced {
+            bit_depth: Some(9),
+            ..advanced
+        },
+        Advanced {
+            sdr_brightness: Some(f64::NAN),
+            ..advanced
+        },
+        Advanced {
+            sdr_saturation: Some(3.0),
+            ..advanced
+        },
+    ] {
+        assert!(command_with_advanced("DP-1", rule, bad).is_err());
+    }
+    assert_eq!(
+        command("DP-1", rule).unwrap(),
+        command_with_advanced("DP-1", rule, Advanced::default()).unwrap()
+    );
+}

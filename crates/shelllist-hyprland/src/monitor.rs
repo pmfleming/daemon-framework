@@ -31,6 +31,64 @@ pub enum Rule<'a> {
     },
 }
 
+/// Optional, explicitly managed monitor attributes. None leaves a rule alone.
+/// VRR is restricted to observable off/on; fullscreen policies cannot be
+/// distinguished by Hyprland's boolean monitor readback.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Advanced<'a> {
+    pub vrr: Option<bool>,
+    pub bit_depth: Option<u8>,
+    pub color: Option<&'a str>,
+    pub sdr_brightness: Option<f64>,
+    pub sdr_saturation: Option<f64>,
+}
+impl Advanced<'_> {
+    pub fn validate(self) -> Result<()> {
+        ensure!(
+            self.bit_depth.is_none_or(|v| matches!(v, 8 | 10)),
+            "Invalid monitor bit depth"
+        );
+        ensure!(
+            self.color.is_none_or(|v| [
+                "srgb", "wide", "edid", "dcip3", "dp3", "adobe", "hdr", "hdredid"
+            ]
+            .contains(&v)),
+            "Invalid monitor color preset"
+        );
+        ensure!(
+            self.sdr_brightness
+                .is_none_or(|v| v.is_finite() && (0.1..=3.0).contains(&v)),
+            "Invalid SDR brightness"
+        );
+        ensure!(
+            self.sdr_saturation
+                .is_none_or(|v| v.is_finite() && (0.0..=2.0).contains(&v)),
+            "Invalid SDR saturation"
+        );
+        Ok(())
+    }
+    fn fields(self) -> Result<String> {
+        self.validate()?;
+        let mut fields = String::new();
+        if let Some(v) = self.vrr {
+            fields.push_str(&format!(", vrr = {}", u8::from(v)));
+        }
+        if let Some(v) = self.bit_depth {
+            fields.push_str(&format!(", bitdepth = {v}"));
+        }
+        if let Some(v) = self.color {
+            fields.push_str(&format!(", cm = \"{v}\""));
+        }
+        if let Some(v) = self.sdr_brightness {
+            fields.push_str(&format!(", sdrbrightness = {v}"));
+        }
+        if let Some(v) = self.sdr_saturation {
+            fields.push_str(&format!(", sdrsaturation = {v}"));
+        }
+        Ok(fields)
+    }
+}
+
 /// Encode one `eval hl.monitor(...)` request for [`crate::Client::request_exact`].
 /// Use exact targeting so a stale session cannot redirect mutations elsewhere.
 ///
@@ -40,7 +98,12 @@ pub enum Rule<'a> {
 /// protection and confirmation against observed state remain caller obligations.
 /// This function performs no IPC, retries, persistence or implicit readback.
 pub fn command(output: &str, rule: Rule<'_>) -> Result<Lua> {
+    command_with_advanced(output, rule, Advanced::default())
+}
+
+pub fn command_with_advanced(output: &str, rule: Rule<'_>, advanced: Advanced<'_>) -> Result<Lua> {
     ensure!(identifier(output), "Invalid Hyprland output identifier");
+    let advanced = advanced.fields()?;
     let Rule::Enable {
         mode,
         position,
@@ -74,7 +137,7 @@ pub fn command(output: &str, rule: Rule<'_>) -> Result<Lua> {
     // hl.monitor merges with the previous rule. Supplying geometry alone does
     // not undo disabled=true, and omitting mirror would retain an old source.
     Ok(Lua(format!(
-        "hl.monitor({{ output = \"{output}\", disabled = false, mode = \"{mode}\", position = \"{position}\", scale = {scale}{transform}, mirror = \"{mirror}\" }})"
+        "hl.monitor({{ output = \"{output}\", disabled = false, mode = \"{mode}\", position = \"{position}\", scale = {scale}{transform}, mirror = \"{mirror}\"{advanced} }})"
     )))
 }
 
