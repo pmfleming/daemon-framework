@@ -1,0 +1,101 @@
+Dependency-policy quality review, 2026-11-10
+
+Scope and frozen evidence
+Baseline clean HEAD ed1254e48f3f83eb0dd0a8287e03799d85ea5f74.
+Changes: shelllist-local-build policy.rs/tests.rs and local-build contract prose.
+No public policy/API/dependency change; no service, deployment or commit actions.
+Artifacts: target/dependency-policy-review/{before,after}, comparison.json,
+summarize.py, provenance.txt, before/source.json and before/profiles/.
+Frozen RQLens: target/dependency-policy-review/rqlens-frozen, version0.1.0,
+SHA256 846b0ad58ade1483a04e5a19cc938c7ef4f011f18d8c2688a976c978a4b8092c.
+Config SHA256 7ede29190858152bc4a6aa870f54089ed89883cbdd10ecc462d06ba6c45f341a.
+Cargo.lock SHA256 ff0dfae56de72b534d1a4cc38697a3c43be5a40adfeba79a5a2409cc8b08f2c4.
+Before/after configs preserve repo defaults; only absolute project/output roots
+change. Same67 authored Rust files, Git HEAD/history mode, default Cargo discovery,
+identity=auto, Rust/Cargo1.95.0 and LLVM21.1.8. No analyzer edits or exclusions.
+Physical counts classify dedicated tests paths and inline cfg(test) module tails;
+all comments/blanks are included, and both states use the same tracked file list.
+Static evidence is authored syntax, not expanded code: declare_methods! remains
+unsupported. No whole-program dead-code or allocation/latency claim is made.
+
+Implementation
+Flatten root/target dependency tables into one iterator, leaving a single edge
+validation loop. Keep package aliases, all dependency kinds, path normalization,
+visited-path cycle termination and every-edge validation. Store fixed framework
+crate names by static reference: removes a String allocation per valid edge.
+Share the framework crate list with required-crate validation; remove the
+redundant check that an already-found optional Hyprland crate was found again.
+Retain missing manifests, private vendoring, pins and missing-crate rejection.
+No speculative deletion of exported APIs or new unsafe/lint escape hatches.
+
+Tests and volume, with limitations
+Consolidate manifest-write/validate setup into a local closure and separate
+orthogonal cases: three daemon requirements, direct/recursive reachability,
+six dependency section kinds, four pin keys, aliased/private/missing paths,
+root/nested edge masking, cycles, ignored external paths and missing manifests.
+This avoids the intermediate Cartesian product (not the comparison baseline).
+Two policy test registrations remain two; whole-source test attributes110->110.
+Temporary fixture groups2->2 and repository() calls9->9 (including reinitializing
+app in the new requirement loop). No reduction in Git fixture executions claimed.
+Manual loop-count audit: first policy test24->9 validate_policy invocations;
+recursive/edge test10->42; combined34->51. Cargo-only cases25->42. Added safety
+boundaries increase execution volume; the user's execution-volume reduction is
+NOT met here. Actual test physical lines fall by2, not by merging registrations.
+
+Matched measurements, before -> after
+Production function SLOC5707->5705; cyclomatic1437->1436;
+cognitive581->575; Halstead effort3615598.76->3607843.42; functions430->431.
+Policy function totals: SLOC203->201, cyclomatic45->44, cognitive30->24,
+Halstead effort142303.88->134548.55.
+validate_dependencies: SLOC59->41, cyclomatic12->10, cognitive12->5,
+effort65056.92->51222.37; new dependencies helper16 SLOC,1 cyclomatic,
+0 cognitive,7038.22 effort. validate_daemon cognitive3->4 (conditional count),
+cyclomatic6->6, effort14407.02->13448.02.
+All functions: SLOC11056->11052, cyclomatic1957->1958, cognitive901->898,
+effort9516540.01->9538946.25. Stronger tests increase aggregate effort/decisions.
+Production/test/total physical Rust lines8271/6741/15012->8277/6739/15016.
+Total physical LOC increases4: shared names/iterator cost6, test source saves2.
+Nonblank production/test lines7715/6570->7719/6571. No total-LOC win claimed.
+Module locality98.3993->98.3993 and leverage23.4328->23.4328 (67 modules).
+Duplication32 groups/361 lines/2.74% unchanged; clone-call sites51 production,
+39 test unchanged. Static-reference insertion avoids allocation without changing
+.clone() counts. Escape-hatch record count6->6; production panic findings0->0.
+Reliability findings498->504, entirely test scope. Scores do not prove reuse
+improvement, absence of dead code, or whole-program correctness.
+
+Executed coverage, same package/all-target/default-feature scope
+Local-build lines645/709(90.9732%)->650/712(91.2921%);
+functions66/73(90.4110%)->71/77(92.2078%);
+regions1158/1345(86.0967%)->1158/1341(86.3535%).
+Policy lines164/172(95.3488%)->169/175(96.5714%);
+functions18/19->23/23; regions294/313->294/309.
+Line/function coverage improves; region percentage gains here reflect fewer
+instrumented regions, not more covered regions. Branch/MC/DC coverage not enabled.
+LLVM totals exclude test bodies; closures contribute function entries. This is
+scoped coverage, not whole-workspace coverage or proof of every possible edge.
+
+Validation and reproduction
+CARGO_BUILD_JOBS=3 throughout. Final uninstrumented workspace all-target tests:
+106 passed,4 existing ignored; local-build6 unit+3 CLI integration passed.
+Strict workspace/all-target Clippy, workspace doctests, fmt and diff-check pass.
+No live Nix graph or compositor acceptance run. Logs are under after/.
+  source /tmp/update-env.sh
+  for stage in before after; do
+    for metric in hotspots clones escape-hatches locality leverage reliability test-quality; do
+      target/dependency-policy-review/rqlens-frozen measure "$metric" --config "target/dependency-policy-review/$stage.toml"
+    done
+  done
+For each source state, use cargo-llvm-cov0.8.5 at
+/nix/store/jjpdf1l6izz6607a346ykra9sndzaw7h-cargo-llvm-cov-0.8.5/bin/cargo-llvm-cov:
+  export CARGO_TARGET_DIR="$PWD/target/dependency-policy-review/coverage-target"
+  export CARGO_LLVM_COV_TARGET_DIR="$CARGO_TARGET_DIR" CARGO_LLVM_COV_BUILD_DIR="$CARGO_TARGET_DIR"
+  export LLVM_COV="$(command -v llvm-cov)" LLVM_PROFDATA="$(command -v llvm-profdata)"
+  eval "$(cargo-llvm-cov llvm-cov show-env --sh)"
+  cargo test -p shelllist-local-build --all-targets --locked
+  cargo-llvm-cov llvm-cov report -p shelllist-local-build --json --output-path STAGE/coverage.json
+Archive *.profraw between states. Before first instrumentation, clean only the
+isolated package outputs: the initial cached noninstrumented build produced no
+profiles. That failed attempt is not a coverage pass. Subsequent instrumented
+source states were compiled and exported independently; original profiles retained.
+Re-measuring before requires restoring before/source.json (do not overwrite final
+source); recorded static/coverage artifacts already preserve both actual states.

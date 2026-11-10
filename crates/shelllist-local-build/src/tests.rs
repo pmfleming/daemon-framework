@@ -239,7 +239,7 @@ fn snapshots_capture_dirty_files_preserve_metadata_and_confine_symlinks() {
 fn source_policy_rejects_pins_divergent_edges_and_private_frameworks() {
     let repos = Repositories::new();
     let (root, app, framework) = repos.matrix();
-    let captured = sources(&[&app, &framework]);
+    let mut captured = sources(&[&app, &framework]);
     for url in [
         "git+file:../daemon-framework?ref=main",
         "git+file:../daemon-framework?rev=123",
@@ -287,126 +287,124 @@ fn source_policy_rejects_pins_divergent_edges_and_private_frameworks() {
         merge(&mut root_inputs, &inputs(overlay));
         error_contains(validate_policy(&captured, &root_inputs), reason);
     }
-    let manifest = fs::read_to_string(app.join("Cargo.toml")).unwrap();
-    let bar = repos.repository(
-        "bar-daemon",
-        Value::Object(definitions(&app)),
-        &[("Cargo.toml", &manifest)],
-    );
-    let valid = "shelllist-hyprland = { path = \"../daemon-framework/crates/shelllist-hyprland\" }";
-    let bt = repos.repository(
-        "bt-daemon",
-        Value::Object(definitions(&app)),
-        &[("Cargo.toml", &manifest.replace(valid, ""))],
-    );
-    let mut sources = sources(&[&app, &bar, &bt, &framework]);
-    let root_inputs = definitions(&root);
-    validate_policy(&sources, &root_inputs).unwrap();
-    for consumer in [&app, &bar] {
-        for invalid in [
-            "shelllist-hyprland = { path = \"../shelllist-hyprland\" }",
-            "shelllist-hyprland = { path = \"vendor/shelllist-hyprland\" }",
-            "shelllist-hyprland = { path = \"../daemon-framework/crates/shelllist-hyprland\", git = \"https://example.org/private\" }",
-            "shelllist-hyprland = \"0.1\"",
-            "",
-        ] {
-            fs::write(
-                consumer.join("Cargo.toml"),
-                manifest.replace(valid, invalid),
-            )
-            .unwrap();
-            error_contains(
-                validate_policy(&sources, &root_inputs),
-                "shelllist-hyprland must use the shared sibling",
-            );
-        }
-        fs::write(consumer.join("Cargo.toml"), &manifest).unwrap();
-        for private in ["vendor/daemon-framework", "vendor/shelllist-hyprland"] {
-            fs::create_dir_all(consumer.join(private)).unwrap();
-            error_contains(validate_policy(&sources, &root_inputs), "vendored");
-            fs::remove_dir(consumer.join(private)).unwrap();
-        }
-    }
-    std::rc::Rc::make_mut(&mut sources.get_mut(&app).unwrap().inputs).insert(
+    std::rc::Rc::make_mut(&mut captured.get_mut(&app).unwrap().inputs).insert(
         "hyprlandIpc".into(),
         json!({"url":"git+file:../shelllist-hyprland"}),
     );
     error_contains(
-        validate_policy(&sources, &root_inputs),
+        validate_policy(&captured, &definitions(&root)),
         "not a separate input",
     );
 }
 
 #[test]
-fn source_policy_follows_internal_crates_and_checks_every_framework_edge() {
+fn source_policy_checks_direct_and_recursive_framework_edges() {
     let repos = Repositories::new();
     let (root, app, framework) = repos.matrix();
-    let nested = fs::read_to_string(app.join("Cargo.toml"))
-        .unwrap()
-        .replace("../daemon-framework/", "../../../daemon-framework/");
-    let root_manifest = "[workspace]\nmembers = [\".\", \"crates/*\"]\n\
-        [dependencies]\ninternal = { path = \"crates/internal\" }\n";
-    let bar = repos.repository(
-        "bar-daemon",
-        Value::Object(definitions(&app)),
-        &[
-            ("Cargo.toml", root_manifest),
-            ("crates/internal/Cargo.toml", &nested),
-        ],
-    );
-    let captured = sources(&[&bar, &framework]);
+    let manifest = fs::read_to_string(app.join("Cargo.toml")).unwrap();
     let root_inputs = definitions(&root);
-    validate_policy(&captured, &root_inputs).unwrap();
-
-    // Cyclic internal edges must not recurse forever.
-    let cyclic = format!("{nested}\nparent = {{ path = \"../..\" }}\n");
-    fs::write(bar.join("crates/internal/Cargo.toml"), &cyclic).unwrap();
-    validate_policy(&captured, &root_inputs).unwrap();
-
-    for invalid in [
-        nested.replace("../../../daemon-framework/", "../../vendor/daemon-framework/"),
-        nested.replace(
-            "shelllist-daemon-core = { path",
-            "shelllist-daemon-core = { git = \"https://example.org/private\", path",
-        ),
-        nested.replace(
-            "shelllist-daemon-core = { path = \"../../../daemon-framework/crates/shelllist-daemon-core\" }",
-            "shelllist-daemon-core = \"0.1\"",
-        ),
-        nested.replace(
-            "shelllist-daemon-core = { path = \"../../../daemon-framework/crates/shelllist-daemon-core\" }",
-            "",
-        ),
-    ] {
-        fs::write(bar.join("crates/internal/Cargo.toml"), invalid).unwrap();
-        error_contains(
-            validate_policy(&captured, &root_inputs),
-            "shelllist-daemon-core must use the shared sibling",
-        );
+    // Daemon requirements are independent of Cargo edge spelling and section.
+    for name in ["app-daemon", "bar-daemon", "bt-daemon"] {
+        let daemon = repos.repository(name, Value::Object(definitions(&app)), &[]);
+        let captured = sources(&[&daemon, &framework]);
+        for package in [
+            "shelllist-daemon-core",
+            "shelllist-daemon-tokio",
+            "shelllist-hyprland",
+        ] {
+            let edge = manifest
+                .lines()
+                .find(|line| line.starts_with(package))
+                .unwrap();
+            fs::write(daemon.join("Cargo.toml"), manifest.replace(edge, "")).unwrap();
+            let result = validate_policy(&captured, &root_inputs);
+            if package == "shelllist-hyprland" && name == "bt-daemon" {
+                result.unwrap();
+            } else {
+                error_contains(result, &format!("{package} must use the shared sibling"));
+            }
+        }
+        fs::write(daemon.join("Cargo.toml"), &manifest).unwrap();
+        validate_policy(&captured, &root_inputs).unwrap();
+        for private in ["vendor/daemon-framework", "vendor/shelllist-hyprland"] {
+            fs::create_dir_all(daemon.join(private)).unwrap();
+            error_contains(validate_policy(&captured, &root_inputs), "vendored");
+            fs::remove_dir(daemon.join(private)).unwrap();
+        }
     }
-    fs::write(bar.join("crates/internal/Cargo.toml"), &nested).unwrap();
-
-    // A valid internal edge must not hide an invalid renamed, dev or target edge.
+    // Exercise recursive traversal once, then vary independent edge dimensions.
+    let captured = sources(&[&app, &framework]);
+    let directory = app.join("crates/internal");
+    fs::create_dir_all(&directory).unwrap();
+    let internal = "[dependencies]\ninternal = { path = 'crates/internal' }\n";
+    fs::write(app.join("Cargo.toml"), internal).unwrap();
+    let path = directory.join("Cargo.toml");
+    let check = |manifest: &str| {
+        fs::write(&path, manifest).unwrap();
+        validate_policy(&captured, &root_inputs)
+    };
+    let valid = manifest.replace("../daemon-framework/", "../../../daemon-framework/");
+    check(&valid).unwrap();
+    // A valid root edge cannot mask the nested invalid aliases below.
+    fs::write(
+        app.join("Cargo.toml"),
+        format!("{manifest}\ninternal = {{ path = 'crates/internal' }}"),
+    )
+    .unwrap();
+    let core = "package = 'shelllist-daemon-core', path = '../../../daemon-framework/crates/shelllist-daemon-core'";
     for section in [
         "dependencies",
         "dev-dependencies",
         "build-dependencies",
         "target.'cfg(unix)'.dependencies",
+        "target.'cfg(unix)'.dev-dependencies",
+        "target.'cfg(unix)'.build-dependencies",
     ] {
-        let separator = if section == "dependencies" {
-            String::new()
-        } else {
-            format!("[{section}]\n")
-        };
-        fs::write(
-            bar.join("Cargo.toml"),
-            format!("{root_manifest}{separator}renamed = {{ package = \"shelllist-daemon-core\", path = \"vendor/core\" }}\n"),
-        ).unwrap();
+        let base = valid.replace("[dependencies]", &format!("[{section}]"));
+        check(&format!("{base}\nrenamed = {{ {core} }}")).unwrap();
         error_contains(
-            validate_policy(&captured, &root_inputs),
+            check(&format!(
+                "{base}\nrenamed = {{ package = 'shelllist-daemon-core', path = 'vendor/core' }}"
+            )),
             "shelllist-daemon-core must use the shared sibling",
         );
     }
+    for pin in ["git", "rev", "branch", "tag"] {
+        error_contains(
+            check(&format!(
+                "{valid}\nrenamed = {{ {core}, {pin} = 'pinned' }}"
+            )),
+            "shelllist-daemon-core must use the shared sibling",
+        );
+    }
+    let hyprland = valid
+        .lines()
+        .find(|line| line.starts_with("shelllist-hyprland ="))
+        .unwrap();
+    for invalid in [
+        "{ path = '../shelllist-hyprland' }",
+        "{ path = 'vendor/shelllist-hyprland' }",
+        "'0.1'",
+        "{ package = 'shelllist-hyprland' }",
+    ] {
+        error_contains(
+            check(&valid.replace(hyprland, &format!("shelllist-hyprland = {invalid}"))),
+            "shelllist-hyprland must use the shared sibling",
+        );
+    }
+    // Every nested rejection above also holds when valid root edges exist.
+    fs::write(app.join("Cargo.toml"), format!("{manifest}\ninternal = {{ path = 'crates/internal' }}\nrenamed = {{ package = 'shelllist-daemon-core', path = 'vendor/core' }}")).unwrap();
+    error_contains(
+        check(&valid),
+        "shelllist-daemon-core must use the shared sibling",
+    );
+    fs::write(app.join("Cargo.toml"), internal).unwrap();
+    check(&format!(
+        "{valid}\nparent = {{ path = '../..' }}\nexternal = {{ path = '../../../unrelated' }}\n"
+    ))
+    .unwrap();
+    fs::remove_file(path).unwrap();
+    error_contains(validate_policy(&captured, &root_inputs), "read ");
 }
 
 #[test]

@@ -61,6 +61,14 @@ the installed package to replace the previous Python-backed desktop command.
   follows relationships fail closed. Live repository locks are never resolved
   or updated by prepare/check/build/develop/run.
 
+Cargo policy follows internal path dependencies recursively, checking ordinary,
+development and build dependencies in both root and target sections. Every
+framework edge, including renamed and repeated edges, must use the shared sibling
+without Git/ref/revision pins; a valid edge cannot mask a private one. Canonical
+paths terminate internal cycles. Core and Tokio are required for each recognized
+daemon; Hyprland is required for app/bar and validated whenever another daemon
+uses it. Unrelated external Cargo paths are not recursively inspected.
+
 The tool still evaluates trusted flake expressions and runs Git/Nix subprocesses;
 porting it to Rust does not make untrusted build inputs safe.
 

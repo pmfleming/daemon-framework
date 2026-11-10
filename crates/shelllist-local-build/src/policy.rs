@@ -20,6 +20,12 @@ const DAEMONS: &[&str] = &[
     "nm-daemon",
 ];
 
+const FRAMEWORK_CRATES: &[&str] = &[
+    "shelllist-daemon-core",
+    "shelllist-daemon-tokio",
+    "shelllist-hyprland",
+];
+
 pub(crate) fn local_path(spec: &Value, root: &Path) -> Result<Option<PathBuf>> {
     let Some(url) = spec.get("url").and_then(Value::as_str) else {
         return Ok(None);
@@ -150,6 +156,24 @@ pub(crate) fn validate_source(source: &Path, directory: &Path, inputs: &Inputs) 
     Ok(())
 }
 
+/// Include ordinary, development and build edges in every target section.
+fn dependencies(manifest: &toml::Value) -> impl Iterator<Item = (&String, &toml::Value)> {
+    std::iter::once(manifest)
+        .chain(
+            manifest
+                .get("target")
+                .and_then(toml::Value::as_table)
+                .into_iter()
+                .flat_map(|targets| targets.values()),
+        )
+        .flat_map(|section| {
+            ["dependencies", "dev-dependencies", "build-dependencies"]
+                .into_iter()
+                .filter_map(move |kind| section.get(kind).and_then(toml::Value::as_table))
+        })
+        .flatten()
+}
+
 /// Follow internal Cargo path dependencies without invoking Cargo (or fetching).
 /// Check every framework edge, not just the first valid occurrence of a crate.
 fn validate_dependencies(
@@ -157,7 +181,7 @@ fn validate_dependencies(
     root: &Path,
     directory: &Path,
     visited: &mut BTreeSet<PathBuf>,
-    found: &mut BTreeSet<String>,
+    found: &mut BTreeSet<&'static str>,
 ) -> Result<()> {
     if !visited.insert(directory.to_path_buf()) {
         return Ok(());
@@ -166,47 +190,29 @@ fn validate_dependencies(
     let manifest: toml::Value = toml::from_str(
         &fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
     )?;
-    let sections = std::iter::once(&manifest).chain(
-        manifest
-            .get("target")
-            .and_then(toml::Value::as_table)
-            .into_iter()
-            .flat_map(|targets| targets.values()),
-    );
-    for section in sections {
-        for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
-            let Some(dependencies) = section.get(kind).and_then(toml::Value::as_table) else {
-                continue;
-            };
-            for (alias, dependency) in dependencies {
-                let package = dependency
-                    .get("package")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or(alias);
-                let dependency_path = dependency
-                    .get("path")
-                    .and_then(toml::Value::as_str)
-                    .map(|path| resolve(&directory.join(path)))
-                    .transpose()?;
-                if matches!(
-                    package,
-                    "shelllist-daemon-core" | "shelllist-daemon-tokio" | "shelllist-hyprland"
-                ) {
-                    let expected =
-                        resolve(&root.join(format!("../daemon-framework/crates/{package}")))?;
-                    ensure!(
-                        dependency_path.as_ref() == Some(&expected)
-                            && !["git", "rev", "branch", "tag"]
-                                .iter()
-                                .any(|key| dependency.get(*key).is_some()),
-                        "{name}: {package} must use the shared sibling framework ({})",
-                        path.display()
-                    );
-                    found.insert(package.to_owned());
-                } else if let Some(path) = dependency_path.filter(|path| path.starts_with(root)) {
-                    validate_dependencies(name, root, &path, visited, found)?;
-                }
-            }
+    for (alias, dependency) in dependencies(&manifest) {
+        let package = dependency
+            .get("package")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(alias);
+        let dependency_path = dependency
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .map(|path| resolve(&directory.join(path)))
+            .transpose()?;
+        if let Some(&package) = FRAMEWORK_CRATES.iter().find(|&&name| name == package) {
+            let expected = resolve(&root.join(format!("../daemon-framework/crates/{package}")))?;
+            ensure!(
+                dependency_path.as_ref() == Some(&expected)
+                    && !["git", "rev", "branch", "tag"]
+                        .iter()
+                        .any(|key| dependency.get(*key).is_some()),
+                "{name}: {package} must use the shared sibling framework ({})",
+                path.display()
+            );
+            found.insert(package);
+        } else if let Some(path) = dependency_path.filter(|path| path.starts_with(root)) {
+            validate_dependencies(name, root, &path, visited, found)?;
         }
     }
     Ok(())
@@ -217,12 +223,12 @@ fn validate_daemon(name: &str, directory: &Path) -> Result<()> {
     let mut visited = BTreeSet::new();
     let mut found = BTreeSet::new();
     validate_dependencies(name, &directory, &directory, &mut visited, &mut found)?;
-    let hyprland =
-        matches!(name, "app-daemon" | "bar-daemon") || found.contains("shelllist-hyprland");
-    let crates = ["shelllist-daemon-core", "shelllist-daemon-tokio"]
-        .into_iter()
-        .chain(hyprland.then_some("shelllist-hyprland"));
-    for name_of_crate in crates {
+    let required = if matches!(name, "app-daemon" | "bar-daemon") {
+        3
+    } else {
+        2
+    };
+    for name_of_crate in &FRAMEWORK_CRATES[..required] {
         ensure!(
             found.contains(name_of_crate),
             "{name}: {name_of_crate} must use the shared sibling framework"
