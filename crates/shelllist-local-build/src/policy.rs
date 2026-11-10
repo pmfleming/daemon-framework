@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     fs,
     os::unix::ffi::OsStrExt,
@@ -149,29 +150,81 @@ pub(crate) fn validate_source(source: &Path, directory: &Path, inputs: &Inputs) 
     Ok(())
 }
 
+/// Follow internal Cargo path dependencies without invoking Cargo (or fetching).
+/// Check every framework edge, not just the first valid occurrence of a crate.
+fn validate_dependencies(
+    name: &str,
+    root: &Path,
+    directory: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+    found: &mut BTreeSet<String>,
+) -> Result<()> {
+    if !visited.insert(directory.to_path_buf()) {
+        return Ok(());
+    }
+    let path = directory.join("Cargo.toml");
+    let manifest: toml::Value = toml::from_str(
+        &fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
+    )?;
+    let sections = std::iter::once(&manifest).chain(
+        manifest
+            .get("target")
+            .and_then(toml::Value::as_table)
+            .into_iter()
+            .flat_map(|targets| targets.values()),
+    );
+    for section in sections {
+        for kind in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            let Some(dependencies) = section.get(kind).and_then(toml::Value::as_table) else {
+                continue;
+            };
+            for (alias, dependency) in dependencies {
+                let package = dependency
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(alias);
+                let dependency_path = dependency
+                    .get("path")
+                    .and_then(toml::Value::as_str)
+                    .map(|path| resolve(&directory.join(path)))
+                    .transpose()?;
+                if matches!(
+                    package,
+                    "shelllist-daemon-core" | "shelllist-daemon-tokio" | "shelllist-hyprland"
+                ) {
+                    let expected =
+                        resolve(&root.join(format!("../daemon-framework/crates/{package}")))?;
+                    ensure!(
+                        dependency_path.as_ref() == Some(&expected)
+                            && !["git", "rev", "branch", "tag"]
+                                .iter()
+                                .any(|key| dependency.get(*key).is_some()),
+                        "{name}: {package} must use the shared sibling framework ({})",
+                        path.display()
+                    );
+                    found.insert(package.to_owned());
+                } else if let Some(path) = dependency_path.filter(|path| path.starts_with(root)) {
+                    validate_dependencies(name, root, &path, visited, found)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_daemon(name: &str, directory: &Path) -> Result<()> {
-    let manifest: toml::Value = toml::from_str(&fs::read_to_string(directory.join("Cargo.toml"))?)?;
-    let dependencies = manifest
-        .get("dependencies")
-        .and_then(toml::Value::as_table)
-        .context("missing Cargo dependencies")?;
-    let hyprland = matches!(name, "app-daemon" | "bar-daemon")
-        || dependencies.contains_key("shelllist-hyprland");
+    let directory = resolve(directory)?;
+    let mut visited = BTreeSet::new();
+    let mut found = BTreeSet::new();
+    validate_dependencies(name, &directory, &directory, &mut visited, &mut found)?;
+    let hyprland =
+        matches!(name, "app-daemon" | "bar-daemon") || found.contains("shelllist-hyprland");
     let crates = ["shelllist-daemon-core", "shelllist-daemon-tokio"]
         .into_iter()
         .chain(hyprland.then_some("shelllist-hyprland"));
     for name_of_crate in crates {
-        let dependency = dependencies
-            .get(name_of_crate)
-            .and_then(toml::Value::as_table);
         ensure!(
-            dependency.is_some_and(|dependency| {
-                dependency.get("path").and_then(toml::Value::as_str)
-                    == Some(format!("../daemon-framework/crates/{name_of_crate}").as_str())
-                    && !["git", "rev", "branch", "tag"]
-                        .iter()
-                        .any(|key| dependency.contains_key(*key))
-            }),
+            found.contains(name_of_crate),
             "{name}: {name_of_crate} must use the shared sibling framework"
         );
     }

@@ -338,6 +338,78 @@ fn source_policy_rejects_pins_divergent_edges_and_private_frameworks() {
 }
 
 #[test]
+fn source_policy_follows_internal_crates_and_checks_every_framework_edge() {
+    let repos = Repositories::new();
+    let (root, app, framework) = repos.matrix();
+    let nested = fs::read_to_string(app.join("Cargo.toml"))
+        .unwrap()
+        .replace("../daemon-framework/", "../../../daemon-framework/");
+    let root_manifest = "[workspace]\nmembers = [\".\", \"crates/*\"]\n\
+        [dependencies]\ninternal = { path = \"crates/internal\" }\n";
+    let bar = repos.repository(
+        "bar-daemon",
+        Value::Object(definitions(&app)),
+        &[
+            ("Cargo.toml", root_manifest),
+            ("crates/internal/Cargo.toml", &nested),
+        ],
+    );
+    let captured = sources(&[&bar, &framework]);
+    let root_inputs = definitions(&root);
+    validate_policy(&captured, &root_inputs).unwrap();
+
+    // Cyclic internal edges must not recurse forever.
+    let cyclic = format!("{nested}\nparent = {{ path = \"../..\" }}\n");
+    fs::write(bar.join("crates/internal/Cargo.toml"), &cyclic).unwrap();
+    validate_policy(&captured, &root_inputs).unwrap();
+
+    for invalid in [
+        nested.replace("../../../daemon-framework/", "../../vendor/daemon-framework/"),
+        nested.replace(
+            "shelllist-daemon-core = { path",
+            "shelllist-daemon-core = { git = \"https://example.org/private\", path",
+        ),
+        nested.replace(
+            "shelllist-daemon-core = { path = \"../../../daemon-framework/crates/shelllist-daemon-core\" }",
+            "shelllist-daemon-core = \"0.1\"",
+        ),
+        nested.replace(
+            "shelllist-daemon-core = { path = \"../../../daemon-framework/crates/shelllist-daemon-core\" }",
+            "",
+        ),
+    ] {
+        fs::write(bar.join("crates/internal/Cargo.toml"), invalid).unwrap();
+        error_contains(
+            validate_policy(&captured, &root_inputs),
+            "shelllist-daemon-core must use the shared sibling",
+        );
+    }
+    fs::write(bar.join("crates/internal/Cargo.toml"), &nested).unwrap();
+
+    // A valid internal edge must not hide an invalid renamed, dev or target edge.
+    for section in [
+        "dependencies",
+        "dev-dependencies",
+        "build-dependencies",
+        "target.'cfg(unix)'.dependencies",
+    ] {
+        let separator = if section == "dependencies" {
+            String::new()
+        } else {
+            format!("[{section}]\n")
+        };
+        fs::write(
+            bar.join("Cargo.toml"),
+            format!("{root_manifest}{separator}renamed = {{ package = \"shelllist-daemon-core\", path = \"vendor/core\" }}\n"),
+        ).unwrap();
+        error_contains(
+            validate_policy(&captured, &root_inputs),
+            "shelllist-daemon-core must use the shared sibling",
+        );
+    }
+}
+
+#[test]
 fn lock_pruning_preserves_remote_pins_resolves_follows_and_rejects_cycles() {
     let lock = json!({"root":"root", "version":7, "nodes": {
         "root":{"inputs":{"local":"local", "a":"a", "alias":["a", "dep"]}},
